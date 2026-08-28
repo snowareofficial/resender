@@ -40,28 +40,19 @@
 // RESEND_API 等常量由 Rust 侧注入（见 src/rhai_ext.rs build_engine 的 const_mod）
 
 // ===========================================================================
-//  国际化（i18n）— 所有 UI 文本字段均可由脚本定义
-//  Rust 侧提供缺省中文，这里可被任意语言/自定义覆盖
+//  国际化（i18n）— 自动识别系统语言（swi18n）
+//
+//  默认行为：Rust 侧按系统语言提供中/英文案（src/i18n.rs 目录），
+//  本函数**不需要也不应**重复设置——留空即用系统语言。
+//
+//  自定义覆盖：如需强制某种语言或增改文案，在此用 ui::set_i18n 覆盖即可
+//  （脚本定义优先级高于 Rust 默认目录）：
+//      ui::set_i18n("t_send", "发送邮件");
+//
+//  当前识别到的语言可用 ui::get_lang() 读取（BCP-47，如 zh-CN / en）。
 // ===========================================================================
 fn setup_i18n() {
-    ui::set_i18n("t_send", "发信");
-    ui::set_i18n("t_settings", "设置");
-    ui::set_i18n("t_history", "历史");
-    ui::set_i18n("t_script", "脚本");
-    ui::set_i18n("t_about", "关于");
-    ui::set_i18n("t_to", "收件人");
-    ui::set_i18n("t_subject", "主题");
-    ui::set_i18n("t_body", "正文");
-    ui::set_i18n("t_from", "发信名称（From）");
-    ui::set_i18n("t_send_btn", "发送");
-    ui::set_i18n("t_api_key", "Resend API Key");
-    ui::set_i18n("t_quota", "套餐月度额度");
-    ui::set_i18n("t_remaining", "本期剩余");
-    ui::set_i18n("t_save", "保存设置");
-    ui::set_i18n("t_unlock", "解锁");
-    ui::set_i18n("t_attachments", "附件");
-    ui::set_i18n("t_add_attachment", "添加附件");
-    ui::set_i18n("t_remove", "移除");
+    // 默认：跟随系统语言，无需覆盖
 }
 
 // ===========================================================================

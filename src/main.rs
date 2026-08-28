@@ -21,6 +21,7 @@
 mod config;
 mod crypto;
 mod history;
+mod i18n;
 mod log;
 mod markdown;
 mod rhai_ext;
@@ -103,6 +104,10 @@ fn setup() -> Result<(Arc<rhai::Engine>, rhai::AST, Arc<RhaiContext>, PathBuf)> 
     if let Err(e) = engine.run_ast(&ast) {
         eprintln!("脚本初始化执行警告: {e}");
     }
+    // 自动识别系统语言，填充默认文案到 i18n 表（脚本 setup_i18n 可覆盖）
+    // 注意：需在脚本 setup_i18n 执行前调用，否则脚本定义会被本目录覆盖
+    let ui_lang = crate::i18n::fill(&ctx);
+    *ctx.ui_lang.lock().unwrap() = ui_lang;
     // 让原语模块（api::call）能拿到引擎与脚本 AST 引用
     let _ = ctx.engine.set(engine.clone());
     let _ = ctx.ast.set(ast.clone().into());

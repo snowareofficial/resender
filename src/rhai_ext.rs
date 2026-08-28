@@ -109,6 +109,8 @@ pub struct RhaiContext {
     pub logs_encrypted: Arc<Mutex<bool>>,
     /// 自动化输入组件的当前值：键为 (handler 名, 字段 key)
     pub field_values: Arc<Mutex<HashMap<(String, String), String>>>,
+    /// 当前界面语言（swi18n detect_language 结果，脚本可经 ui::get_lang 读取）
+    pub ui_lang: Arc<Mutex<String>>,
 }
 
 impl RhaiContext {
@@ -131,6 +133,7 @@ impl RhaiContext {
             automations: Arc::new(Mutex::new(HashMap::new())),
             logs: Arc::new(Mutex::new(Vec::new())),
             field_values: Arc::new(Mutex::new(HashMap::new())),
+            ui_lang: Arc::new(Mutex::new("en".to_string())),
         })
     }
 }
@@ -463,6 +466,12 @@ pub mod ui_primitives {
         let ctx = crate::RHAI_CTX.get().expect("rhai ctx");
         let map = ctx.i18n.lock().unwrap();
         map.get(key).cloned().unwrap_or_else(|| key.to_string()).into()
+    }
+
+    /// 当前界面语言（swi18n 自动识别，BCP-47 如 zh-CN / en）
+    pub fn get_lang() -> rhai::ImmutableString {
+        let ctx = crate::RHAI_CTX.get().expect("rhai ctx");
+        ctx.ui_lang.lock().unwrap().clone().into()
     }
 
     /// 设置主题色：key -> 十六进制颜色（如 #3b82f6）

@@ -4621,6 +4621,7 @@ dependencies = [
  "serde_json",
  "slint",
  "slint-build",
+ "swi18n",
  "tokio",
 ]
 
@@ -5461,6 +5462,10 @@ dependencies = [
  "yazi",
  "zeno",
 ]
+
+[[package]]
+name = "swi18n"
+version = "0.1.0"
 
 [[package]]
 name = "syn"

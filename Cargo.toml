@@ -24,6 +24,8 @@ rfd = "0.15"
 # comrak 关掉默认 feature（默认含 cli + syntect 语法高亮，会显著拖慢编译且本项目不需要）
 comrak = { version = "0.54", default-features = false }
 css-inline = { version = "0.21", default-features = false }
+# i18n：系统语言识别 + 消息目录（path 依赖，crates.io 发布后改为版本号）
+swi18n = { path = "../swi18n" }
 
 [build-dependencies]
 slint-build = "1.8"
