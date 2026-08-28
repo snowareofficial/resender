@@ -1,4 +1,4 @@
-// Copyright (C) 2026~now S.A.
+﻿// Copyright (C) 2026~now S.A.
 // SPDX-License-Identifier: MulanPubL-2.0
 
 //![allow(non_snake_case)]
@@ -20,11 +20,13 @@
 
 mod config;
 mod crypto;
+mod draft;
 mod history;
 mod i18n;
 mod log;
 mod markdown;
 mod rhai_ext;
+mod update;
 
 use anyhow::Result;
 use base64::Engine as _;
@@ -192,7 +194,8 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     // 命令行调用功能（无 GUI）
     if args.len() > 1 && (args[1] == "send" || args[1] == "run" || args[1] == "help" || args[1] == "--help" || args[1] == "-h"
-        || args[1] == "version" || args[1] == "--version" || args[1] == "-V") {
+        || args[1] == "version" || args[1] == "--version" || args[1] == "-V"
+        || args[1] == "check-update") {
         // release 下本进程无控制台：附加父终端，让 CLI 输出可见
         attach_parent_console();
         return run_cli(&args[1..]);
@@ -248,6 +251,7 @@ fn main() -> Result<()> {
     // 反映到 UI
     ui.set_api_key(ss(cfg.api_key.clone()));
     ui.set_from_name(ss(cfg.from_name.clone()));
+    ui.set_keep_after_send(cfg.keep_after_send);
     ui.set_plan_index(cfg.plan_index as i32);
     ui.set_custom_quota_text(ss(cfg.custom_quota.to_string()));
     ui.set_cycle_start(ss(cfg.cycle_start.clone()));
@@ -269,6 +273,31 @@ fn main() -> Result<()> {
     refresh_logs_ui_inner(&ui, &ctx);
     // 刷新自动化 handler 列表（脚本在加载时已注册）
     ui.set_automation_items(ModelRc::from(Rc::new(VecModel::from(automation_items(&ctx)))));
+
+    // 恢复上次保存的草稿（发信页表单）
+    restore_draft(&ui);
+
+    // 启动时静默检查更新（配置了 update_url 才检查；失败不打扰用户）
+    if !cfg.update_url.is_empty() {
+        let url = cfg.update_url.clone();
+        let ui_weak_upd = ui.as_weak();
+        std::thread::spawn(move || {
+            match crate::update::fetch_remote(&url) {
+                Ok(rv) if crate::update::has_update(APP_VERSION, &rv) => {
+                    if let Some(ui) = ui_weak_upd.upgrade() {
+                        let note = if rv.note.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n{}", rv.note)
+                        };
+                        let msg = format!("发现新版本 {}（当前 {}）{}", rv.latest, APP_VERSION, note);
+                        set_status_state(&ui, "发现新版本", 0, Some(msg));
+                    }
+                }
+                _ => {}
+            }
+        });
+    }
 
     // 启动时执行脚本初始化（i18n / 默认主题），让界面文本立即生效
     {
@@ -293,7 +322,7 @@ fn main() -> Result<()> {
     // ---- 保存设置（仍走 Rust，因为涉及 UI 字段 <-> config 映射）----
     let ui_weak = ui.as_weak();
     let ctx_save = ctx.clone();
-    ui.on_save_settings(move |api_key, from_name, crypto_password, plan_index, enc_apikey, enc_from, custom_quota_text, cycle_start| {
+    ui.on_save_settings(move |api_key, from_name, crypto_password, plan_index, enc_apikey, enc_from, custom_quota_text, cycle_start, keep_after_send| {
         let custom_quota: i64 = custom_quota_text.trim().parse().unwrap_or(0);
         let mut c = AppConfig::load();
         let mut api_key_out = api_key.to_string();
@@ -331,6 +360,7 @@ fn main() -> Result<()> {
         c.plan_index = plan_index as usize;
         c.custom_quota = custom_quota;
         c.cycle_start = cycle_start.to_string();
+        c.keep_after_send = keep_after_send;
 
         // 信任设置（从 UI 读取，单独获取）
         if let Some(ui) = ui_weak.upgrade() {
@@ -417,36 +447,14 @@ fn main() -> Result<()> {
     let ctx_send = ctx.clone();
     ui.on_send_mail(move |to_text, subject, body, mode, attachments| {
         let pw = ctx_send.crypto_password.lock().unwrap().clone();
-        let mut scope = make_scope();
-        // 设置全局 crypto_password
-        scope.push("crypto_password", pw.clone());
         let to_s = to_text.to_string();
         let subj_s = subject.to_string();
         let body_s = body.to_string();
-        // 按正文模式决定最终发送内容与是否为 HTML
-        let (final_body, html_b) = resolve_body(&body_s, mode);
-
-        // 读取附件并编码为 base64，注入脚本
-        let mut attach_list: Vec<rhai::Dynamic> = Vec::new();
-        for path_str in attachments.iter() {
-            let p = std::path::Path::new(path_str.as_str());
-            match std::fs::read(p) {
-                Ok(bytes) => {
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    let filename = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                    let mut m = rhai::Map::new();
-                    m.insert("filename".into(), filename.into());
-                    m.insert("content".into(), b64.into());
-                    attach_list.push(rhai::Dynamic::from(m));
-                }
-                Err(e) => {
-                    if let Some(ui) = ui_weak3.upgrade() {
-                        ui.set_status_text(ss(format!("读取附件失败: {e}")));
-                        ui.set_status_err(true);
-                    }
-                    return;
-                }
-            }
+        let attach_paths: Vec<String> = attachments.iter().map(|s| s.to_string()).collect();
+        // 立即进入忙碌态（按钮禁用 + 状态栏进行中，蓝色保底 0.2s），保证反馈即时
+        if let Some(ui) = ui_weak3.upgrade() {
+            ui.set_sending(true);
+            set_status_state(&ui, "发送中…", 0, None);
         }
 
         let ui_send = ui_weak3.clone();
@@ -454,6 +462,36 @@ fn main() -> Result<()> {
         let ast_c = ast_send.clone();
         let ctx_spawn = ctx_send.clone();
         std::thread::spawn(move || {
+            // 所有耗时操作（Markdown 转换、附件读取与 base64）都在后台线程，
+            // 主线程只做 UI 反馈，杜绝大内容/大附件卡界面
+            let mut scope = make_scope();
+            // 设置全局 crypto_password
+            scope.push("crypto_password", pw.clone());
+            let (final_body, html_b) = resolve_body(&body_s, mode);
+
+            let mut attach_list: Vec<rhai::Dynamic> = Vec::new();
+            for path_str in &attach_paths {
+                let p = std::path::Path::new(path_str);
+                match std::fs::read(p) {
+                    Ok(bytes) => {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        let filename = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                        let mut m = rhai::Map::new();
+                        m.insert("filename".into(), filename.into());
+                        m.insert("content".into(), b64.into());
+                        attach_list.push(rhai::Dynamic::from(m));
+                    }
+                    Err(e) => {
+                        if let Some(ui) = ui_send.upgrade() {
+                            ui.set_status_text(ss(format!("读取附件失败: {e}")));
+                            ui.set_status_err(true);
+                            ui.set_sending(false);
+                        }
+                        return;
+                    }
+                }
+            }
+
             let result: Result<(), Box<dyn std::error::Error>> = (|| {
                 eng.call_fn(&mut scope, &ast_c, "send_mail",
                     (to_s, subj_s, final_body, html_b, pw, attach_list))?;
@@ -462,8 +500,9 @@ fn main() -> Result<()> {
             // 读取状态
             let (status, is_err) = ctx_spawn.status.lock().unwrap().clone();
             if let Some(ui) = ui_send.upgrade() {
-                ui.set_status_text(ss(status));
-                ui.set_status_err(is_err);
+                // 最终状态：成功=绿(1) / 失败=红(2)
+                set_status_state(&ui, &status, if is_err { 2 } else { 1 }, None);
+                ui.set_sending(false);
                 // 刷新计数 + 历史
                 let c = AppConfig::load();
                 ui.set_month_count(c.month_count as i32);
@@ -471,14 +510,59 @@ fn main() -> Result<()> {
                 refresh_history_ui(&ui, &ctx_spawn);
                 // 刷新运行日志
                 refresh_logs_ui_inner(&ui, &ctx_spawn);
+                // 发送成功且设置「不保留原件」时，清空表单与草稿
+                if !is_err {
+                    let cfg_after = AppConfig::load();
+                    if !cfg_after.keep_after_send {
+                        clear_compose_form(&ui);
+                    }
+                }
             }
             if let Err(e) = result {
                 if let Some(ui) = ui_send.upgrade() {
-                    ui.set_status_text(ss(format!("脚本执行错误: {e}")));
-                    ui.set_status_err(true);
+                    set_status_state(&ui, &format!("脚本执行错误: {e}"), 2, None);
+                    ui.set_sending(false);
                 }
             }
         });
+    });
+
+    // ---- 存为草稿 / 清空表单 ----
+    let ui_weak_draft = ui.as_weak();
+    ui.on_save_draft(move |to, subject, body, mode, attachments| {
+        let d = draft::Draft {
+            to: to.to_string(),
+            subject: subject.to_string(),
+            body: body.to_string(),
+            body_mode: mode,
+            attachments: attachments.iter().map(|s| s.to_string()).collect(),
+        };
+        if d.is_empty() {
+            if let Some(ui) = ui_weak_draft.upgrade() {
+                ui.set_status_text(ss("表单为空，未保存草稿"));
+                ui.set_status_err(false);
+            }
+            return;
+        }
+        match d.save() {
+            Ok(()) => {
+                if let Some(ui) = ui_weak_draft.upgrade() {
+                    set_status_state(&ui, "草稿已保存", 1, Some("草稿已保存，下次启动自动恢复".into()));
+                }
+            }
+            Err(e) => {
+                if let Some(ui) = ui_weak_draft.upgrade() {
+                    set_status_state(&ui, &format!("草稿保存失败: {e}"), 2, None);
+                }
+            }
+        }
+    });
+    let ui_weak_clear = ui.as_weak();
+    ui.on_clear_form(move || {
+        if let Some(ui) = ui_weak_clear.upgrade() {
+            clear_compose_form(&ui);
+            set_status_state(&ui, "表单已清空", 1, None);
+        }
     });
 
     // ---- 正文预览：生成 HTML 写入临时文件，用系统默认浏览器打开 ----
@@ -739,6 +823,87 @@ fn main() -> Result<()> {
 
     ui.run()?;
     Ok(())
+}
+
+/// 设置状态栏：文字 + 状态（0=进行中 1=成功 2=失败）+ 可选 toast 提示
+///
+/// 进行中状态会**至少保持 0.2 秒**：操作即使瞬间完成，用户也能看到蓝色反馈，
+/// 不会出现"点了没反应"的观感。实现：先置蓝，再调度一个 0.2s 后的延迟
+/// 把状态改为最终结果（若期间又被置为新的进行中，则忽略旧调度）。
+fn set_status_state(
+    ui: &App,
+    text: &str,
+    state: i32,
+    toast: Option<String>,
+) {
+    ui.set_status_text(ss(text));
+    ui.set_status_err(state == 2);
+    if let Some(t) = toast {
+        ui.set_toast_text(ss(t));
+    }
+    // 已经是最终状态（非进行中）则直接置位
+    if state != 0 {
+        ui.set_status_state(state);
+        return;
+    }
+    // 进行中：立即置蓝，并保证最少 0.2s 才允许变为最终状态
+    let weak = ui.as_weak();
+    ui.set_status_state(0);
+    let finish = move |final_state: i32| {
+        if let Some(ui) = weak.upgrade() {
+            // 若期间又开始了新的操作（又回到进行中），不覆盖
+            if ui.get_status_state() == 0 {
+                ui.set_status_state(final_state);
+            }
+        }
+    };
+    // 0.2s 后把"进行中"推进到最终态（由调用方在发送线程里调 set_status_state 最终态时本函数已用）
+    let weak2 = ui.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(200), move || {
+        if let Some(ui) = weak2.upgrade() {
+            if ui.get_status_state() == 0 {
+                ui.set_status_state(1);
+            }
+        }
+        drop(finish);
+    });
+}
+
+/// 清空发信表单（收件人/主题/正文/附件），并删除已保存草稿
+fn clear_compose_form(ui: &App) {
+    ui.set_to_text(ss(""));
+    ui.set_subject_text(ss(""));
+    ui.set_body_text(ss(""));
+    ui.set_body_mode(0);
+    ui.set_attachments(ModelRc::from(Rc::new(VecModel::from(Vec::<slint::SharedString>::new()))));
+    ui.set_attachment_names(ModelRc::from(Rc::new(VecModel::from(Vec::<slint::SharedString>::new()))));
+    let _ = draft::Draft::default().clear();
+}
+
+/// 启动时恢复已保存草稿（若存在）
+fn restore_draft(ui: &App) {
+    if let Some(d) = draft::Draft::load() {
+        if d.is_empty() {
+            return;
+        }
+        ui.set_to_text(ss(d.to));
+        ui.set_subject_text(ss(d.subject));
+        ui.set_body_text(ss(d.body));
+        ui.set_body_mode(d.body_mode);
+        let paths: Vec<slint::SharedString> =
+            d.attachments.iter().map(|s| slint::SharedString::from(s.clone())).collect();
+        let names: Vec<slint::SharedString> = d
+            .attachments
+            .iter()
+            .filter_map(|p| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .map(|n| slint::SharedString::from(n.to_string_lossy().to_string()))
+            })
+            .collect();
+        ui.set_attachments(ModelRc::from(Rc::new(VecModel::from(paths))));
+        ui.set_attachment_names(ModelRc::from(Rc::new(VecModel::from(names))));
+    }
 }
 
 /// 按正文模式决定最终发送内容与是否为 HTML。
@@ -1088,11 +1253,39 @@ fn run_cli(args: &[String]) -> Result<()> {
         // 打印版本（与 GUI 关于页同源，均来自 Cargo.toml）
         println!("SWE::Resender {APP_VERSION}");
         Ok(())
+    } else if args.first().map(|s| s.as_str()) == Some("check-update") {
+        // 版本检查：读取本地配置的 VersionFile 地址，与当前版本比对
+        let cfg = AppConfig::load();
+        let url = cfg.update_url.clone();
+        if url.is_empty() {
+            eprintln!("未配置更新检查地址（设置 → update_url）");
+            std::process::exit(2);
+        }
+        println!("当前版本: {APP_VERSION}");
+        match crate::update::fetch_remote(&url) {
+            Ok(rv) => {
+                println!("远端版本: {}", rv.latest);
+                if !rv.note.is_empty() {
+                    println!("更新说明: {}", rv.note);
+                }
+                if crate::update::has_update(APP_VERSION, &rv) {
+                    println!("发现新版本，可前往更新: {}", rv.url);
+                } else {
+                    println!("已是最新版本");
+                }
+            }
+            Err(e) => {
+                eprintln!("检查失败: {e}");
+                std::process::exit(1);
+            }
+        }
+        Ok(())
     } else {
         println!("Resender 命令行用法:");
         println!("  resender send --to <收件人> --subject <主题> --body <正文> [--html] [--from <发信名>] [--api-key <key>] [--password <解密密码>]");
         println!("  resender run <handler名称> [参数...]   运行脚本注册的自动化 handler");
         println!("  resender version | --version | -V      打印版本");
+        println!("  resender check-update                   检查更新（需在设置中配置 update_url）");
         Ok(())
     }
 }

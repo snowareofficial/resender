@@ -44,6 +44,8 @@ export component ComposeTab inherits Rectangle {
     callback preview-body(string, int);
     callback pick-attachment();
     callback remove-attachment(int);
+    callback save-draft(string, string, string, int, [string]);
+    callback clear-form();
 
     VerticalLayout {
         spacing: 12px;
@@ -186,6 +188,18 @@ export component ComposeTab inherits Rectangle {
                         }
                     }
                     Rectangle { horizontal-stretch: 1; }
+                    PrimaryButton {
+                        text: "存为草稿";
+                        subtle: true;
+                        enabled: !root.sending;
+                        clicked => { root.save-draft(root.to-text, root.subject-text, root.body-text, root.body-mode, root.attachments); }
+                    }
+                    PrimaryButton {
+                        text: "清空表单";
+                        subtle: true;
+                        enabled: !root.sending && (root.to-text != "" || root.subject-text != "" || root.body-text != "" || root.attachments.length > 0);
+                        clicked => { root.clear-form(); }
+                    }
                     PrimaryButton {
                         text: root.sending ? (root.t-send + "中…") : (root.t-send + "邮件");
                         enabled: !root.sending;

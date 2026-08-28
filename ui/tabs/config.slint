@@ -25,6 +25,8 @@ export component ConfigTab inherits Rectangle {
     // 外观
     in-out property <bool> nav-collapsed: false;
     in-out property <bool> zen-mode: false;
+    // 发送行为
+    in-out property <bool> keep-after-send: false;
     // 信任
     in-out property <bool> trust-enabled: false;
     in-out property <string> trust-password: "";
@@ -37,7 +39,7 @@ export component ConfigTab inherits Rectangle {
     in-out property <string> t-from: "发信名称（From）";
     in-out property <string> t-save: "保存设置";
 
-    callback save-settings(string, string, string, int, bool, bool, string, string);
+    callback save-settings(string, string, string, int, bool, bool, string, string, bool);
     callback unlock-trust(string, string);
     callback lock-trust();
     callback set-nav-collapsed(bool);
@@ -117,15 +119,22 @@ export component ConfigTab inherits Rectangle {
                 HorizontalLayout {
                     spacing: 8px;
                     PrimaryButton { text: root.trust-unlocked ? "已信任 · 点击锁定" : "解锁并信任"; enabled: root.trust-enabled; clicked => { if root.trust-unlocked { root.lock-trust(); } else { root.unlock-trust(root.trust-password, root.sig-hex); } } }
-                    PrimaryButton { text: "保存信任设置"; clicked => { root.save-settings(root.api-key, root.from-name, root.crypto-password, root.plan-index, root.enc-apikey, root.enc-from, root.custom-quota-text, root.cycle-start); } }
+                    PrimaryButton { text: "保存信任设置"; clicked => { root.save-settings(root.api-key, root.from-name, root.crypto-password, root.plan-index, root.enc-apikey, root.enc-from, root.custom-quota-text, root.cycle-start, root.keep-after-send); } }
                 }
                 Text { text: root.trust-unlocked ? "✓ 脚本已受信任，原语已开放" : "○ 尚未解锁，敏感原语被禁用"; color: root.trust-unlocked ? Theme.success : Theme.muted; font-size: 11px; }
             }
         }
 
+        Card { title: "发送行为";
+            VerticalLayout {
+                spacing: 6px;
+                CheckBox { text: "发送成功后保留表单内容（不自动清空）"; checked <=> root.keep-after-send; }
+            }
+        }
+
         PrimaryButton {
             text: root.t-save;
-            clicked => { root.save-settings(root.api-key, root.from-name, root.crypto-password, root.plan-index, root.enc-apikey, root.enc-from, root.custom-quota-text, root.cycle-start); }
+            clicked => { root.save-settings(root.api-key, root.from-name, root.crypto-password, root.plan-index, root.enc-apikey, root.enc-from, root.custom-quota-text, root.cycle-start, root.keep-after-send); }
         }
         Text { text: "配置保存在本地；加密字段仅存密文，密码不落盘"; font-size: 11px; color: Theme.muted; }
     }

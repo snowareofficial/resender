@@ -1,4 +1,4 @@
-// Copyright (C) 2026~now S.A.
+﻿// Copyright (C) 2026~now S.A.
 // SPDX-License-Identifier: MulanPubL-2.0
 
 //![allow(non_snake_case)]
@@ -47,6 +47,12 @@ pub struct AppConfig {
     pub script_sig_verify: String,
     /// 验证用公钥（hex 编码；sm2 为 65 字节 04||x||y，pq 为对应算法公钥）
     pub script_pubkey: String,
+
+    /// 发送成功后是否保留表单内容（true 保留；false 自动清空）
+    pub keep_after_send: bool,
+
+    /// 更新检查的 VersionFile 地址（URL），为空则不检查
+    pub update_url: String,
 }
 
 impl Default for AppConfig {
@@ -70,6 +76,9 @@ impl Default for AppConfig {
             script_trust_password: String::new(),
             script_sig_verify: "off".to_string(),
             script_pubkey: String::new(),
+            // 发送成功后默认清空表单
+            keep_after_send: false,
+            update_url: String::new(),
         }
     }
 }

@@ -49,7 +49,9 @@ export component App inherits Window {
     callback preview-body(string, int);
     callback pick-attachment();
     callback remove-attachment(int);
-    callback save-settings(string, string, string, int, bool, bool, string, string);
+    callback save-draft(string, string, string, int, [string]);
+    callback clear-form();
+    callback save-settings(string, string, string, int, bool, bool, string, string, bool);
     callback unlock(string);
     callback unlock-trust(string, string);
     callback lock-trust();
@@ -123,6 +125,8 @@ export component App inherits Window {
     in-out property <string> crypto_password;
     in-out property <bool> enc_apikey;
     in-out property <bool> enc_from;
+    // 发送成功后是否保留表单内容（默认清空）
+    in-out property <bool> keep_after_send: false;
     in-out property <int> plan_index: 0;
     in-out property <string> custom_quota_text: "0";
     in-out property <string> cycle_start;
@@ -135,6 +139,10 @@ export component App inherits Window {
     in-out property <bool> unlocked: false;
     in-out property <string> status_text: "就绪";
     in-out property <bool> status_err: false;
+    // 状态栏视觉状态：0=进行中(蓝) 1=成功(绿) 2=失败(红)，由 Rust 侧驱动
+    in-out property <int> status_state: 1;
+    // 可选弹出提示（toast）：Rust 侧置非空后显示，几秒后自动消失
+    in-out property <string> toast_text: "";
     in-out property <string> script_path: "";
     in-out property <string> sorg_banner: "";
     // 应用版本：由 Rust 侧用 CARGO_PKG_VERSION 填充（发版后自动同步，无需手改）
@@ -315,6 +323,8 @@ export component App inherits Window {
                             preview-body(b, m) => { root.preview-body(b, m); }
                             pick-attachment() => { root.pick-attachment(); }
                             remove-attachment(i) => { root.remove-attachment(i); }
+                            save-draft(t, s, b, m, a) => { root.save-draft(t, s, b, m, a); }
+                            clear-form() => { root.clear-form(); }
                         }
 
                         if tab == 1 : ConfigTab {
@@ -332,6 +342,7 @@ export component App inherits Window {
                             month-count: root.month_count;
                             nav-collapsed: root.nav_collapsed;
                             zen-mode: root.zen_mode;
+                            keep-after-send <=> root.keep_after_send;
                             trust-enabled <=> root.trust_enabled;
                             trust-password <=> root.trust_password;
                             sig-mode <=> root.sig_mode;
@@ -341,7 +352,7 @@ export component App inherits Window {
                             t-api-key: root.t_api_key;
                             t-from: root.t_from;
                             t-save: root.t_save;
-                            save-settings(a, f, p, pi, ea, ef, cq, cs) => { root.save-settings(a, f, p, pi, ea, ef, cq, cs); }
+                            save-settings(a, f, p, pi, ea, ef, cq, cs, keep) => { root.save-settings(a, f, p, pi, ea, ef, cq, cs, keep); }
                             unlock-trust(p, s) => { root.unlock-trust(p, s); }
                             lock-trust() => { root.lock-trust(); }
                             set-nav-collapsed(v) => { root.set-nav-collapsed(v); }
@@ -390,6 +401,7 @@ export component App inherits Window {
         }
 
         // 状态栏（专注模式隐藏；固定细条，不参与剩余空间分配）
+        // 背景色随操作结果变化：进行中=蓝 / 成功=绿 / 失败=红
         status_wrap := VerticalLayout {
             spacing: 0px;
             vertical-stretch: 0;
@@ -399,21 +411,25 @@ export component App inherits Window {
             if !root.zen_mode : Rectangle { height: 1px; background: Theme.border; }
             if !root.zen_mode : Rectangle {
             height: 18px;
+            background: root.status_state == 0 ? Theme.info_soft
+                : (root.status_state == 2 ? Theme.danger_soft : Theme.success_soft);
             HorizontalLayout {
                 padding-left: 12px;
                 padding-right: 14px;
                 spacing: 7px;
                 alignment: center;
-                // 状态指示灯：出错为红，正常为绿（布局内自动垂直居中）
+                // 状态指示灯：进行中=蓝 / 成功=绿 / 失败=红
                 Rectangle {
                     width: 6px;
                     height: 6px;
                     border-radius: 3px;
-                    background: root.status_err ? Theme.danger : Theme.success;
+                    background: root.status_state == 0 ? Theme.info
+                        : (root.status_state == 2 ? Theme.danger : Theme.success);
                 }
                 Text {
                     text: root.status_text;
-                    color: root.status_err ? Theme.danger : Theme.fg_secondary;
+                    color: root.status_state == 0 ? Theme.info
+                        : (root.status_state == 2 ? Theme.danger : Theme.fg_secondary);
                     font-size: 11px;
                     vertical-alignment: center;
                 }
@@ -427,6 +443,39 @@ export component App inherits Window {
                     vertical-alignment: center;
                 }
             }
+            }
+        }
+
+        // ---- Toast 弹出提示（可选）：短暂显示后自动消失 ----
+        if root.toast_text != "" : Rectangle {
+            // 覆盖层：提示之外整体变暗（半透明遮罩），聚焦到提示内容
+            background: #00000055;
+            TouchArea { }
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: Math.min(360px, parent.width - 80px);
+                border-radius: 12px;
+                background: Theme.surface;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: 16px;
+                drop-shadow-color: #00000044;
+                VerticalLayout {
+                    spacing: 10px;
+                    padding: 18px;
+                    Text {
+                        text: root.toast_text;
+                        font-size: 13px;
+                        color: Theme.fg;
+                        wrap: word_wrap;
+                        horizontal-alignment: center;
+                    }
+                    PrimaryButton {
+                        text: "知道了";
+                        clicked => { root.toast_text = ""; }
+                    }
+                }
             }
         }
     }

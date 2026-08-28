@@ -1,4 +1,4 @@
-// Copyright (C) 2026~now S.A.
+﻿// Copyright (C) 2026~now S.A.
 // SPDX-License-Identifier: MulanPubL-2.0
 
 //![allow(non_snake_case)]
