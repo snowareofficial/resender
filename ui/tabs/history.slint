@@ -1,0 +1,51 @@
+// Copyright (C) 2026~now S.A.
+// SPDX-License-Identifier: MulanPubL-2.0
+
+// ===========================================================================
+//  历史页：全部发信记录（永久保存在本地 history.json）
+// ===========================================================================
+import { ListView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Card, PrimaryButton } from "../widgets.slint";
+
+export component HistoryTab inherits Rectangle {
+    in-out property <[string]> history-items: [];
+    in-out property <int> history-count: 0;
+
+    callback clear-history();
+    // 由外层在确认后调用：这里只负责发起确认请求
+    callback request-clear();
+
+    VerticalLayout {
+        spacing: 14px;
+        vertical-stretch: 1;
+
+        Card { title: "发信历史";
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 4px;
+                vertical-stretch: 1;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "共 " + root.history-count + " 条，永久保存在本地 history.json（最新在前）"; font-size: 12px; color: Theme.muted; }
+                    Rectangle { horizontal-stretch: 1; }
+                    PrimaryButton {
+                        text: "清空历史";
+                        subtle: true;
+                        clicked => { root.request-clear(); }
+                    }
+                }
+                ListView {
+                    min-height: 200px;
+                    vertical-stretch: 1;
+                    for item in root.history-items : Text {
+                        text: item;
+                        font-size: 12px;
+                        color: Theme.fg;
+                        wrap: word_wrap;
+                    }
+                }
+            }
+        }
+    }
+}

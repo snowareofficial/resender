@@ -1,0 +1,121 @@
+// Copyright (C) 2026~now S.A.
+// SPDX-License-Identifier: MulanPubL-2.0
+
+// ===========================================================================
+//  窗口外框部件：自定义顶栏（无边框模式下承载窗口控制）+ 左侧导航栏
+// ===========================================================================
+import { Theme } from "theme.slint";
+import { NavItem, WindowControls } from "widgets.slint";
+
+// 自定义顶栏（可拖动移动窗口；整体可隐藏）
+export component TitleBar inherits Rectangle {
+    in-out property <bool> show: true;
+    in-out property <string> title;
+    in-out property <string> platform: "windows";
+    callback minimize;
+    callback toggle-maximize;
+    callback quit;
+    callback advanced;
+    callback drag-window(float, float);
+    height: 48px;
+    // 品牌渐变顶栏（低饱和版本），深色标题文字保证可读
+    background: @linear-gradient(90deg, Theme.brand_soft_from 0%, Theme.brand_soft_to 100%);
+    drop-shadow-blur: 6px;
+    drop-shadow-color: Theme.shadow;
+    drop-shadow-offset-y: 1px;
+    // 拖动层：覆盖整个顶栏，按住左键拖动窗口；按钮区在其上仍可点击
+    TouchArea {
+        property <bool> dragging: false;
+        property <float> last_x: 0.0;
+        property <float> last_y: 0.0;
+        pointer-event(e) => {
+            if e.button == PointerEventButton.left {
+                if e.kind == PointerEventKind.down {
+                    dragging = true;
+                    last_x = self.mouse-x / 1px;
+                    last_y = self.mouse-y / 1px;
+                } else if e.kind == PointerEventKind.up {
+                    dragging = false;
+                } else if e.kind == PointerEventKind.move && dragging {
+                    root.drag-window((self.mouse-x / 1px) - last_x, (self.mouse-y / 1px) - last_y);
+                    last_x = self.mouse-x / 1px;
+                    last_y = self.mouse-y / 1px;
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 11px;
+        padding: 10px;
+        // 左上角 logo —— 顶栏与左栏的重合点（窗口最左上）
+        Image {
+            source: @image-url("../assets/logo.png");
+            width: 30px;
+            height: 30px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.title;
+            font-size: 16px;
+            font-weight: 700;
+            color: Theme.fg;
+            letter-spacing: 0.3px;
+            vertical-alignment: center;
+        }
+        // 右侧弹簧（把窗口按钮推到右边）
+        Rectangle { horizontal-stretch: 1; min-width: 0px; }
+        WindowControls {
+            platform: root.platform;
+            minimize => { root.minimize(); }
+            toggle-maximize => { root.toggle-maximize(); }
+            quit => { root.quit(); }
+            advanced => { root.advanced(); }
+        }
+    }
+}
+
+// 左侧导航栏
+export component NavRail inherits Rectangle {
+    vertical-stretch: 1;
+    in-out property <bool> collapsed: false;
+    in-out property <int> tab;
+    in-out property <bool> topbar_visible: true; // 顶栏是否显示：决定导航顶部 logo 是否绘制
+    callback nav(int);
+    background: Theme.surface;
+    border-width: 0;
+    border-color: Theme.border;
+    width: root.collapsed ? 64px : 220px;
+    // 侧栏与内容区之间以右侧细分隔线区分，比纯白更立体
+    drop-shadow-blur: 8px;
+    drop-shadow-color: Theme.shadow;
+    drop-shadow-offset-x: 2px;
+    VerticalLayout {
+        spacing: 6px;
+        padding: 14px;
+        // 顶部 logo（与窗口左上角重合点；顶栏隐藏时由导航承载该 logo）
+        if !root.topbar_visible : Image {
+            source: @image-url("../assets/logo.png");
+            width: root.collapsed ? 36px : 48px;
+            height: root.collapsed ? 36px : 48px;
+        }
+        if !root.topbar_visible : Rectangle { height: 8px; }
+
+        // 导航按钮组：在侧栏剩余空间中垂直居中，避免顶部堆叠造成下半空白
+        Rectangle {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: center;
+                spacing: 6px;
+                NavItem { icon: "M22 7l-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7 M2 5.18A2 2 0 0 1 3.59 4h16.82A2 2 0 0 1 22 5.18V18.8A2 2 0 0 1 20.41 20H3.59A2 2 0 0 1 2 18.82V7"; label: "发信"; active: root.tab == 0; collapsed: root.collapsed; clicked => { root.nav(0); } }
+                NavItem { icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20 Z M12 6 L12 12 L16 14"; label: "历史"; active: root.tab == 2; collapsed: root.collapsed; clicked => { root.nav(2); } }
+                NavItem { icon: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z M12 12m-3 0a3 3 0 1 0 6 0 3 3 0 1 0-6 0"; label: "设置"; active: root.tab == 1; collapsed: root.collapsed; clicked => { root.nav(1); } }
+                NavItem { icon: "M16 18 L22 12 L16 6 M8 6 L2 12 L8 18"; label: "脚本"; active: root.tab == 3; collapsed: root.collapsed; clicked => { root.nav(3); } }
+                NavItem { icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20 Z M12 16v-4 M12 8h.01"; label: "关于"; active: root.tab == 4; collapsed: root.collapsed; clicked => { root.nav(4); } }
+                Rectangle { height: 8px; }
+                NavItem { icon: "M3 3h18v18H3Z M9 3v18"; label: "收起/展开"; collapsed: root.collapsed; clicked => { root.nav(-1); } }
+                Rectangle { height: 8px; }
+                NavItem { icon: "M4 4h16v4H4Z M4 10h16v4H4Z M4 16h16v4H4Z"; label: "自动化"; active: root.tab == 5; collapsed: root.collapsed; clicked => { root.nav(5); } }
+            }
+        }
+    }
+}

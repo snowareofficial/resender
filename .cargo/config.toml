@@ -1,0 +1,11 @@
+# 项目级配置：覆盖用户级 `~/.cargo/config.toml` 的 E 盘 target-dir
+#
+# 原因：本项目依赖 ring（经 reqwest 的 rustls-tls），ring 的 build script 会调用
+# GNU `ar` 打包预编译的 .o。把 target 放到 E 盘时，`ar` 报
+#   "could not create temporary file whilst writing archive"
+# 跨盘符创建临时文件失败；把 TMP/TEMP/TMPDIR 一并指向 E 盘也无效。
+#
+# 因此本项目必须用与临时目录同盘符（C 盘）的 target。
+# 用户级配置仍把 E 盘作为默认，供无 ring 依赖的轻量项目（如 sml）使用。
+[build]
+target-dir = "target"

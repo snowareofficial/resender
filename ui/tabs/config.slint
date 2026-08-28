@@ -1,0 +1,132 @@
+// Copyright (C) 2026~now S.A.
+// SPDX-License-Identifier: MulanPubL-2.0
+
+// ===========================================================================
+//  设置页：Resend 账户 / 数据加密 / 套餐 / 外观 / 脚本信任
+// ===========================================================================
+import { LineEdit, ComboBox, CheckBox } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Card, PrimaryButton, FieldBox } from "../widgets.slint";
+
+export component ConfigTab inherits Rectangle {
+    // 账户
+    in-out property <string> api-key: "";
+    in-out property <string> from-name: "";
+    in-out property <string> crypto-password: "";
+    in-out property <bool> enc-apikey: false;
+    in-out property <bool> enc-from: false;
+    in-out property <bool> unlocked: false;
+    // 套餐
+    in-out property <int> plan-index: 0;
+    in-out property <[string]> plans: [];
+    in-out property <string> custom-quota-text: "0";
+    in-out property <string> cycle-start: "";
+    in-out property <int> month-count: 0;
+    // 外观
+    in-out property <bool> nav-collapsed: false;
+    in-out property <bool> zen-mode: false;
+    // 信任
+    in-out property <bool> trust-enabled: false;
+    in-out property <string> trust-password: "";
+    in-out property <string> sig-mode: "off";
+    in-out property <string> pubkey: "";
+    in-out property <string> sig-hex: "";
+    in-out property <bool> trust-unlocked: false;
+    // i18n
+    in-out property <string> t-api-key: "Resend API Key";
+    in-out property <string> t-from: "发信名称（From）";
+    in-out property <string> t-save: "保存设置";
+
+    callback save-settings(string, string, string, int, bool, bool, string, string);
+    callback unlock-trust(string, string);
+    callback lock-trust();
+    callback set-nav-collapsed(bool);
+    callback set-zen(bool);
+
+    VerticalLayout {
+        spacing: 14px;
+        vertical-stretch: 1;
+
+        Card { title: "Resend 账户（可加密）";
+            VerticalLayout {
+                spacing: 8px;
+                Text { text: root.t-api-key + "（re_ 开头）"; color: Theme.fg; }
+                FieldBox { LineEdit { placeholder-text: "re_xxxxxxxx"; text <=> root.api-key; input-type: password; } }
+                Text { text: root.t-from; color: Theme.fg; }
+                FieldBox { LineEdit { placeholder-text: "Soup Team <noreply@soup.dev>"; text <=> root.from-name; } }
+                HorizontalLayout {
+                    spacing: 12px;
+                    CheckBox { text: "加密 API Key"; checked <=> root.enc-apikey; }
+                    CheckBox { text: "加密发信名称"; checked <=> root.enc-from; }
+                }
+            }
+        }
+
+        Card { title: "数据加密（libsmx 国密 SM4-GCM）";
+            VerticalLayout {
+                spacing: 8px;
+                Text { text: "加密密码（同一密码可用于多个分类）"; color: Theme.fg; }
+                FieldBox { LineEdit { placeholder-text: "设置一个密码，用于加密所选分类"; text <=> root.crypto-password; input-type: password; } }
+                Text {
+                    text: root.unlocked ? "已解锁，可读取加密数据" : "保存加密数据后，下次需用此密码解锁才能读取";
+                    color: root.unlocked ? Theme.success : Theme.muted;
+                    font-size: 11px;
+                }
+            }
+        }
+
+        Card { title: "Resend 套餐（处理余量）";
+            VerticalLayout {
+                spacing: 8px;
+                Text { text: "选择套餐"; color: Theme.fg; }
+                FieldBox { ComboBox { model: root.plans; current-index <=> root.plan-index; } }
+                Text { text: "或自定义月度额度（填数字）"; color: Theme.fg; }
+                FieldBox { LineEdit { placeholder-text: "如 100000"; text <=> root.custom-quota-text; } }
+                Text { text: "用量统计周期起点（YYYY-MM-DD，留空为当月1号）"; color: Theme.fg; }
+                FieldBox { LineEdit { placeholder-text: "YYYY-MM-DD"; text <=> root.cycle-start; } }
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "本期已用："; color: Theme.fg; }
+                    Text { text: root.month-count; color: Theme.fg; }
+                }
+            }
+        }
+
+        Card { title: "界面外观";
+            VerticalLayout {
+                spacing: 8px;
+                CheckBox { text: "收起导航文字（仅图标）"; checked: root.nav-collapsed; toggled => { root.set-nav-collapsed(self.checked); } }
+                CheckBox { text: "专注模式（禅模式，隐藏全部边框）"; checked: root.zen-mode; toggled => { root.set-zen(self.checked); } }
+                Text { text: "快捷键：Ctrl+1~5 切换页 · Ctrl+\\ 收起导航 · Ctrl+K 高级 · F11 专注"; font-size: 10px; color: Theme.muted; wrap: word_wrap; }
+            }
+        }
+
+        Card { title: "脚本信任机制（Rhai 安全沙箱）";
+            VerticalLayout {
+                spacing: 8px;
+                Text { text: "功能默认禁用；启用后需输入信任密码并在此处解锁才能调用 http/crypto/store 原语。"; font-size: 11px; color: Theme.muted; wrap: word_wrap; }
+                CheckBox { text: "启用脚本信任（默认关闭）"; checked: root.trust-enabled; toggled => { root.trust-enabled = self.checked; } }
+                Text { text: "信任密码（与加密密码独立，单向校验）"; color: Theme.fg; }
+                FieldBox { LineEdit { placeholder-text: "设置信任密码"; text <=> root.trust-password; input-type: password; } }
+                Text { text: "签名校验模式"; color: Theme.fg; }
+                FieldBox { ComboBox { model: ["off", "sm2", "pq"]; current-value <=> root.sig-mode; } }
+                Text { text: "验证公钥（hex；sm2=65字节 04||x||y，pq=对应公钥）"; color: Theme.fg; }
+                FieldBox { LineEdit { placeholder-text: "公钥 hex"; text <=> root.pubkey; } }
+                Text { text: "脚本签名（hex；与 default.rhai 内容对应）"; color: Theme.fg; }
+                FieldBox { LineEdit { placeholder-text: "签名 hex（留空则在解锁时跳过验签）"; text <=> root.sig-hex; } }
+                HorizontalLayout {
+                    spacing: 8px;
+                    PrimaryButton { text: root.trust-unlocked ? "已信任 · 点击锁定" : "解锁并信任"; enabled: root.trust-enabled; clicked => { if root.trust-unlocked { root.lock-trust(); } else { root.unlock-trust(root.trust-password, root.sig-hex); } } }
+                    PrimaryButton { text: "保存信任设置"; clicked => { root.save-settings(root.api-key, root.from-name, root.crypto-password, root.plan-index, root.enc-apikey, root.enc-from, root.custom-quota-text, root.cycle-start); } }
+                }
+                Text { text: root.trust-unlocked ? "✓ 脚本已受信任，原语已开放" : "○ 尚未解锁，敏感原语被禁用"; color: root.trust-unlocked ? Theme.success : Theme.muted; font-size: 11px; }
+            }
+        }
+
+        PrimaryButton {
+            text: root.t-save;
+            clicked => { root.save-settings(root.api-key, root.from-name, root.crypto-password, root.plan-index, root.enc-apikey, root.enc-from, root.custom-quota-text, root.cycle-start); }
+        }
+        Text { text: "配置保存在本地；加密字段仅存密文，密码不落盘"; font-size: 11px; color: Theme.muted; }
+    }
+}

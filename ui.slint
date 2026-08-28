@@ -1,0 +1,430 @@
+// ===========================================================================
+//  Resender 主窗口
+//  结构：主题 → 通用控件 → 顶栏/导航 → 各页面
+//  （所有 UI 细节已拆分到 ui/ 目录，本文件只负责布局装配与回调接线）
+// ===========================================================================
+import { ScrollView, CheckBox, Palette } from "std-widgets.slint";
+import { Theme } from "ui/theme.slint";
+import { Card, PrimaryButton, AutomationItem } from "ui/widgets.slint";
+import { TitleBar, NavRail } from "ui/chrome.slint";
+import { ComposeTab } from "ui/tabs/compose.slint";
+import { ConfigTab } from "ui/tabs/config.slint";
+import { HistoryTab } from "ui/tabs/history.slint";
+import { ScriptTab } from "ui/tabs/script.slint";
+import { InfoTab } from "ui/tabs/info.slint";
+import { AutomationTab } from "ui/tabs/automation.slint";
+
+// 嵌入小米 MiSans VF 可变字体，作为全局默认字体
+// 许可要求：应在软件中注明使用了 MiSans 字体（见「关于」页与 ui/font-license.txt）
+import "ui/MiSans VF.ttf";
+
+// 重新导出主题全局，使 Rust 侧（include_modules!）能生成并访问 Theme 类型
+export { Theme } from "ui/theme.slint";
+
+export component App inherits Window {
+    title: "Resender - Resend 发信工具";
+    width: 860px;
+    height: 760px;
+    background: Theme.bg;
+    icon: @image-url("assets/logo.png");
+    no-frame: root.use_custom_titlebar; // 默认使用系统边框（可自由调整大小）
+    // 全局默认字体（真实 family 名为 "MiSans VF"，由 tools/font_info.py 读取确认）
+    // 若该字体加载失败，Slint 会回退到系统默认字体，不至于白屏
+    default-font-family: Theme.font_family;
+
+    // ------------------------------------------------------------------
+    // 原生控件配色：强制锁定浅色方案。
+    // 否则当系统处于暗色模式时，LineEdit / TextEdit / CheckBox / ComboBox
+    // 会跟随系统渲染成白字，与我们的浅色背景冲突导致"看不见"。
+    // 注意：组件体内不允许 `Palette.xxx:` 点号赋值，states 块也只支持元素 id，
+    // 因此改为双向绑定把该属性暴露出去，再由 Rust 侧设定为浅色（见 main.rs）。
+    // ------------------------------------------------------------------
+    in-out property <ColorScheme> color-scheme <=> Palette.color-scheme;
+
+    property <int> tab: 0; // 0=发信 1=设置 2=历史 3=脚本 4=关于 5=自动化
+
+    // ---- 回调 ----
+    // 正文模式：0=Markdown（自动转 HTML） 1=HTML 2=纯文本
+    callback send-mail(string, string, string, int, [string]);
+    callback preview-body(string, int);
+    callback pick-attachment();
+    callback remove-attachment(int);
+    callback save-settings(string, string, string, int, bool, bool, string, string);
+    callback unlock(string);
+    callback unlock-trust(string, string);
+    callback lock-trust();
+    callback reload-script();
+    callback toggle-theme();
+    callback refresh-automations();
+    callback run-automation(string);
+    callback set-field-value(string, string, string);
+    callback clear-history();
+    callback refresh-logs();
+    callback clear-logs();
+    callback minimize();
+    callback toggle-maximize();
+    callback quit();
+    callback advanced();
+    callback toggle-nav();
+    callback toggle-zen();
+    callback set-nav-collapsed(bool);
+    callback set-zen(bool);
+    callback drag-window(float, float);
+
+    // ---- 平台与状态 ----
+    in-out property <string> platform: "windows";
+    in-out property <bool> trust_unlocked: false;
+    in-out property <bool> trust_enabled: false;
+    in-out property <string> trust_password: "";
+    in-out property <string> sig_mode: "off";
+    in-out property <string> pubkey: "";
+    in-out property <string> sig_hex: "";
+
+    // ---- 外观开关 ----
+    in-out property <bool> dark_mode: false;
+    in-out property <bool> nav_collapsed: false;
+    in-out property <bool> zen_mode: false;
+    in-out property <bool> advanced_open: false;
+    in-out property <bool> confirm_open: false;
+    // 无边框模式：true 时隐藏系统边框并显示自定义顶栏（含窗口控制按钮）
+    in-out property <bool> use_custom_titlebar: false;
+
+    // ---------- i18n（由 Rhai 脚本填充，缺省中文） ----------
+    in-out property <string> t_send: "发信";
+    in-out property <string> t_settings: "设置";
+    in-out property <string> t_history: "历史";
+    in-out property <string> t_script: "脚本";
+    in-out property <string> t_about: "关于";
+    in-out property <string> t_to: "收件人";
+    in-out property <string> t_subject: "主题";
+    in-out property <string> t_body: "正文";
+    in-out property <string> t_from: "发信名称（From）";
+    in-out property <string> t_send_btn: "发送";
+    in-out property <string> t_api_key: "Resend API Key";
+    in-out property <string> t_quota: "套餐月度额度";
+    in-out property <string> t_remaining: "本期剩余";
+    in-out property <string> t_save: "保存设置";
+    in-out property <string> t_unlock: "解锁";
+    in-out property <string> t_attachments: "附件";
+    in-out property <string> t_add_attachment: "添加附件";
+    in-out property <string> t_remove: "移除";
+
+    // ---------- 业务数据（Rust 读写） ----------
+    in-out property <string> to_text;
+    in-out property <string> subject_text;
+    in-out property <string> body_text;
+    // 正文模式：0=Markdown 1=HTML 2=纯文本（由发信页的模式标签切换）
+    in-out property <int> body_mode: 0;
+    // 正文编辑区高度：由发信页分隔条拖拽调整（本次会话内有效）
+    in-out property <length> body_height: 320px;
+    in-out property <string> from_display;
+    in-out property <string> api_key;
+    in-out property <string> from_name;
+    in-out property <string> crypto_password;
+    in-out property <bool> enc_apikey;
+    in-out property <bool> enc_from;
+    in-out property <int> plan_index: 0;
+    in-out property <string> custom_quota_text: "0";
+    in-out property <string> cycle_start;
+    in-out property <[string]> plans;
+    in-out property <int> plan_quota: 0;
+    in-out property <string> plan_label;
+    in-out property <int> month_count: 0;
+    in-out property <int> total_count: 0;
+    in-out property <bool> sending: false;
+    in-out property <bool> unlocked: false;
+    in-out property <string> status_text: "就绪";
+    in-out property <bool> status_err: false;
+    in-out property <string> script_path: "";
+    in-out property <string> sorg_banner: "";
+    // 应用版本：由 Rust 侧用 CARGO_PKG_VERSION 填充（发版后自动同步，无需手改）
+    in-out property <string> app-version: "0.0.0";
+    in-out property <[string]> history_items;
+    in-out property <int> history_count: 0;
+    in-out property <[string]> attachments;
+    in-out property <[string]> attachment_names;
+    in-out property <[string]> log_lines;
+    // 日志是否已加密落盘（需已设置加密密码）
+    in-out property <bool> logs_encrypted: false;
+    in-out property <int> log_count: 0;
+    in-out property <string> automation_result: "";
+    in-out property <bool> automation_err: false;
+    in-out property <[AutomationItem]> automation_items: [];
+
+    // ---- 键盘快捷键 ----
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(e) => {
+            if e.modifiers.control {
+                if e.text == "1" { tab = 0; }
+                else if e.text == "2" { tab = 1; }
+                else if e.text == "3" { tab = 2; }
+                else if e.text == "4" { tab = 3; }
+                else if e.text == "5" { tab = 4; }
+                else if e.text == "6" { tab = 5; }
+                else if e.text == "\\" { root.toggle-nav(); }
+                else if e.text == "k" || e.text == "K" { root.advanced(); }
+            } else if e.text == "F11" {
+                root.toggle-zen();
+            }
+            return reject;
+        }
+    }
+
+    // 整体布局：顶栏(可隐藏) + [导航(可隐藏) | 内容] + 状态栏(可隐藏)
+    // 显式填满窗口：若只依赖根布局的隐式拉伸，窗口底部可能残留未被布局
+    // 覆盖的窗口背景（表现为状态栏下方的空白条）
+    root_layout := VerticalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 0px;
+
+        // 顶栏：仅在无边框模式下显示，承载最小化/全屏/关闭（系统边框模式由 OS 提供标题栏）
+        if root.use_custom_titlebar && !root.zen_mode : TitleBar {
+            title: "SWE::Resender";
+            platform: root.platform;
+            minimize => { root.minimize(); }
+            toggle-maximize => { root.toggle-maximize(); }
+            quit => { root.quit(); }
+            advanced => { root.advanced(); }
+            drag-window(x, y) => { root.drag-window(x, y); }
+        }
+        if root.use_custom_titlebar && !root.zen_mode : Rectangle { height: 1px; background: Theme.border; }
+
+        // 主体（占据窗口剩余垂直空间，防止状态栏被拉伸）
+        body_layout := HorizontalLayout {
+            spacing: 0px;
+            vertical-stretch: 1;
+            // 显式吃掉除状态栏外的全部高度：仅靠 vertical-stretch 在本布局中不生效
+            // （实测主体会停在 NavRail 自然高度 432px，窗口底部残留约 309px 空白）
+            height: root_layout.height - status_wrap.height;
+
+            if !root.zen_mode : NavRail {
+                vertical-stretch: 1;
+                collapsed: root.nav_collapsed;
+                tab: root.tab;
+                // 无边框模式下顶栏承载 logo，此时导航栏不重复绘制
+                topbar_visible: root.use_custom_titlebar;
+                nav(n) => {
+                    if n < 0 { root.toggle-nav(); }
+                    else { tab = n; }
+                }
+            }
+            if !root.zen_mode : Rectangle { width: 1px; background: Theme.border; }
+
+            // 内容区（承载滚动内容与覆盖层）
+            Rectangle {
+                vertical-stretch: 1;
+                horizontal-stretch: 1;
+
+                // 高级 Flyout（覆盖在右上角）
+                if root.advanced_open : Rectangle {
+                    background: Theme.scrim;
+                    TouchArea { clicked => { root.advanced_open = false; } }
+                    Rectangle {
+                        x: parent.width - 280px;
+                        y: 8px;
+                        width: 264px;
+                        background: Theme.surface;
+                        border-radius: 14px;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        drop-shadow-blur: 24px;
+                        drop-shadow-color: Theme.shadow_strong;
+                        drop-shadow-offset-y: 6px;
+                        TouchArea { }
+                        VerticalLayout {
+                            spacing: 10px;
+                            padding: 18px;
+                            Text { text: "高级功能"; font-size: 15px; font-weight: 700; color: Theme.fg; letter-spacing: 0.3px; }
+                            Rectangle { height: 1px; background: Theme.border; }
+                            PrimaryButton { text: root.dark_mode ? "切换到亮色" : "切换到暗色"; clicked => { root.toggle-theme(); root.advanced_open = false; } }
+                            PrimaryButton { text: "重新加载脚本"; clicked => { root.reload-script(); root.advanced_open = false; } }
+                            CheckBox { text: "收起导航文字"; checked: root.nav_collapsed; toggled => { root.set-nav-collapsed(self.checked); } }
+                            CheckBox { text: "专注模式（禅模式）"; checked: root.zen_mode; toggled => { root.set-zen(self.checked); } }
+                            CheckBox { text: "无边框窗口（自定义顶栏）"; checked: root.use_custom_titlebar; toggled => { root.use_custom_titlebar = self.checked; } }
+                            Text { text: "快捷键：Ctrl+1~6 切换页 · Ctrl+\\ 收起导航 · Ctrl+K 高级 · F11 专注"; font-size: 10px; color: Theme.muted; wrap: word_wrap; }
+                        }
+                    }
+                }
+
+                // 确认对话框覆盖层（清空历史等破坏性操作）
+                if root.confirm_open : Rectangle {
+                    background: Theme.scrim;
+                    TouchArea { clicked => { root.confirm_open = false; } }
+                    Rectangle {
+                        x: (parent.width - 320px) / 2;
+                        y: (parent.height - 158px) / 2;
+                        width: 320px;
+                        height: 158px;
+                        background: Theme.surface;
+                        border-radius: 14px;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        drop-shadow-blur: 28px;
+                        drop-shadow-color: Theme.shadow_strong;
+                        drop-shadow-offset-y: 8px;
+                        TouchArea { }
+                        VerticalLayout {
+                            spacing: 14px;
+                            padding: 18px;
+                            Text { text: "确定清空全部发信历史？此操作不可恢复。"; color: Theme.fg; font-size: 13px; wrap: word_wrap; }
+                            Rectangle { vertical-stretch: 1; }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                PrimaryButton { text: "取消"; subtle: true; clicked => { root.confirm_open = false; } }
+                                Rectangle { horizontal-stretch: 1; }
+                                PrimaryButton {
+                                    text: "确认清空";
+                                    clicked => { root.confirm_open = false; root.clear-history(); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 14px;
+                        padding: 20px;
+                        vertical-stretch: 1;
+
+                        if tab == 0 : ComposeTab {
+                            vertical-stretch: 1;
+                            month-count: root.month_count;
+                            total-count: root.total_count;
+                            plan-label: root.plan_label;
+                            plan-quota: root.plan_quota;
+                            to-text <=> root.to_text;
+                            subject-text <=> root.subject_text;
+                            body-text <=> root.body_text;
+                            body-mode <=> root.body_mode;
+                            body-height <=> root.body_height;
+                            from-display: root.from_display;
+                            sending: root.sending;
+                            attachments: root.attachments;
+                            attachment-names: root.attachment_names;
+                            t-send: root.t_send;
+                            t-attachments: root.t_attachments;
+                            t-add-attachment: root.t_add_attachment;
+                            t-remove: root.t_remove;
+                            send-mail(t, s, b, m, a) => { root.send-mail(t, s, b, m, a); }
+                            preview-body(b, m) => { root.preview-body(b, m); }
+                            pick-attachment() => { root.pick-attachment(); }
+                            remove-attachment(i) => { root.remove-attachment(i); }
+                        }
+
+                        if tab == 1 : ConfigTab {
+                            vertical-stretch: 1;
+                            api-key <=> root.api_key;
+                            from-name <=> root.from_name;
+                            crypto-password <=> root.crypto_password;
+                            enc-apikey <=> root.enc_apikey;
+                            enc-from <=> root.enc_from;
+                            unlocked: root.unlocked;
+                            plan-index <=> root.plan_index;
+                            plans: root.plans;
+                            custom-quota-text <=> root.custom_quota_text;
+                            cycle-start <=> root.cycle_start;
+                            month-count: root.month_count;
+                            nav-collapsed: root.nav_collapsed;
+                            zen-mode: root.zen_mode;
+                            trust-enabled <=> root.trust_enabled;
+                            trust-password <=> root.trust_password;
+                            sig-mode <=> root.sig_mode;
+                            pubkey <=> root.pubkey;
+                            sig-hex <=> root.sig_hex;
+                            trust-unlocked: root.trust_unlocked;
+                            t-api-key: root.t_api_key;
+                            t-from: root.t_from;
+                            t-save: root.t_save;
+                            save-settings(a, f, p, pi, ea, ef, cq, cs) => { root.save-settings(a, f, p, pi, ea, ef, cq, cs); }
+                            unlock-trust(p, s) => { root.unlock-trust(p, s); }
+                            lock-trust() => { root.lock-trust(); }
+                            set-nav-collapsed(v) => { root.set-nav-collapsed(v); }
+                            set-zen(v) => { root.set-zen(v); }
+                        }
+
+                        if tab == 2 : HistoryTab {
+                            vertical-stretch: 1;
+                            history-items: root.history_items;
+                            history-count: root.history_count;
+                            request-clear() => { root.confirm_open = true; }
+                            clear-history() => { root.clear-history(); }
+                        }
+
+                        if tab == 3 : ScriptTab {
+                            vertical-stretch: 1;
+                            script-path: root.script_path;
+                            sorg-banner: root.sorg_banner;
+                            log-lines: root.log_lines;
+                            logs-encrypted: root.logs_encrypted;
+                            log-count: root.log_count;
+                            reload-script() => { root.reload-script(); }
+                            refresh-logs() => { root.refresh-logs(); }
+                            clear-logs() => { root.clear-logs(); }
+                        }
+
+                        if tab == 4 : InfoTab {
+                            vertical-stretch: 1;
+                            sorg-banner: root.sorg_banner;
+                            app-version: root.app-version;
+                        }
+
+                        if tab == 5 : AutomationTab {
+                            vertical-stretch: 1;
+                            automation-items: root.automation_items;
+                            automation-result: root.automation_result;
+                            automation-err: root.automation_err;
+                            refresh-automations() => { root.refresh-automations(); }
+                            run-automation(n) => { root.run-automation(n); }
+                            set-field-value(n, k, v) => { root.set-field-value(n, k, v); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 状态栏（专注模式隐藏；固定细条，不参与剩余空间分配）
+        status_wrap := VerticalLayout {
+            spacing: 0px;
+            vertical-stretch: 0;
+            // 显式高度（1px 分隔线 + 18px 状态条）：让主体的高度计算不依赖布局缓存，
+            // 否则会形成绑定循环（body-l.height -> rl.layout-cache -> status-wrap.height）
+            height: root.zen_mode ? 0px : 19px;
+            if !root.zen_mode : Rectangle { height: 1px; background: Theme.border; }
+            if !root.zen_mode : Rectangle {
+            height: 18px;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 14px;
+                spacing: 7px;
+                alignment: center;
+                // 状态指示灯：出错为红，正常为绿（布局内自动垂直居中）
+                Rectangle {
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 3px;
+                    background: root.status_err ? Theme.danger : Theme.success;
+                }
+                Text {
+                    text: root.status_text;
+                    color: root.status_err ? Theme.danger : Theme.fg_secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Image { source: @image-url("assets/logo.png"); width: 13px; height: 13px; vertical-alignment: center; }
+                Text {
+                    text: "SWE::Resender";
+                    color: Theme.muted;
+                    font-size: 11px;
+                    letter-spacing: 0.4px;
+                    vertical-alignment: center;
+                }
+            }
+            }
+        }
+    }
+}

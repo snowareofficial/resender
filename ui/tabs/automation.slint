@@ -1,0 +1,117 @@
+// Copyright (C) 2026~now S.A.
+// SPDX-License-Identifier: MulanPubL-2.0
+
+// ===========================================================================
+//  自动化页：列出脚本注册的 handler，渲染其声明的输入组件，运行并显示返回结果
+// ===========================================================================
+import { LineEdit, TextEdit, CheckBox } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Card, PrimaryButton, AutomationItem, FieldBox } from "../widgets.slint";
+
+export component AutomationTab inherits Rectangle {
+    in-out property <[AutomationItem]> automation-items: [];
+    in-out property <string> automation-result: "";
+    in-out property <bool> automation-err: false;
+
+    callback refresh-automations();
+    // 运行：参数值由 Rust 侧按字段声明顺序收集
+    callback run-automation(string);
+    // 记录某个 handler 某个输入组件的值
+    callback set-field-value(string, string, string);
+
+    VerticalLayout {
+        spacing: 14px;
+        vertical-stretch: 1;
+
+        Card { title: "自动化 / 可编程 API";
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "脚本可用 api::register / api::register_with_fields 注册 handler；声明的输入组件（text / password / bool / multiline）会在此渲染，填写后运行。";
+                    font-size: 12px;
+                    color: Theme.muted;
+                    wrap: word_wrap;
+                }
+                PrimaryButton { text: "刷新列表"; subtle: true; clicked => { root.refresh-automations(); } }
+                if root.automation-items.length == 0 : Text { text: "（暂无已注册的 handler，脚本加载时自动注册）"; font-size: 12px; color: Theme.muted; }
+
+                for item in root.automation-items : VerticalLayout {
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: item.name + (item.desc != "" ? (" — " + item.desc) : "");
+                            font-size: 13px;
+                            color: Theme.fg;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        PrimaryButton {
+                            text: "运行";
+                            min-width: 72px;
+                            clicked => { root.run-automation(item.name); }
+                        }
+                    }
+
+                    // 脚本声明的输入组件
+                    if item.fields.length > 0 : Rectangle {
+                        background: Theme.bg;
+                        border-radius: 8px;
+                        VerticalLayout {
+                            spacing: 6px;
+                            padding: 10px;
+                            for f in item.fields : HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                Text {
+                                    text: f.label;
+                                    font-size: 12px;
+                                    color: Theme.fg;
+                                    width: 110px;
+                                    vertical-alignment: center;
+                                }
+                                if f.kind == "bool" : CheckBox {
+                                    text: "";
+                                    checked: f.value == "true";
+                                    toggled => { root.set-field-value(item.name, f.key, self.checked ? "true" : "false"); }
+                                }
+                                if f.kind == "multiline" : FieldBox {
+                                    box-height: 70px;
+                                    TextEdit {
+                                        text: f.value;
+                                        edited(v) => { root.set-field-value(item.name, f.key, v); }
+                                    }
+                                }
+                                if f.kind != "bool" && f.kind != "multiline" : FieldBox {
+                                    horizontal-stretch: 1;
+                                    LineEdit {
+                                        placeholder-text: f.label;
+                                        text: f.value;
+                                        input-type: f.kind == "password" ? InputType.password : InputType.text;
+                                        edited(v) => { root.set-field-value(item.name, f.key, v); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Card { title: "返回结果";
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: root.automation-result != "" ? root.automation-result : "（尚未运行）";
+                    color: root.automation-err ? Theme.danger : Theme.success;
+                    font-size: 12px;
+                    wrap: word_wrap;
+                    font-family: Theme.font_mono;
+                }
+            }
+        }
+    }
+}

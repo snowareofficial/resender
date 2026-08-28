@@ -1,0 +1,199 @@
+// Copyright (C) 2026~now S.A.
+// SPDX-License-Identifier: MulanPubL-2.0
+
+// ===========================================================================
+//  发信页：收件人 / 主题 / 正文（可拖拽伸缩 + Markdown）/ 附件 / 发送
+//
+//  正文是发信页的主体，因此：
+//   - 统计信息下移到底栏，把纵向空间让给正文
+//   - 正文区高度可由下方分隔条拖拽调整（160px ~ 900px）
+//   - 支持三种正文模式：Markdown（自动转邮件友好 HTML）/ HTML / 纯文本
+// ===========================================================================
+import { LineEdit, TextEdit } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Card, PrimaryButton, FieldBox, VSplitter, ModeTab } from "../widgets.slint";
+
+export component ComposeTab inherits Rectangle {
+    // 统计
+    in-out property <int> month-count: 0;
+    in-out property <int> total-count: 0;
+    in-out property <string> plan-label: "";
+    in-out property <int> plan-quota: 0;
+    // 表单
+    in-out property <string> to-text: "";
+    in-out property <string> subject-text: "";
+    in-out property <string> body-text: "";
+    // 正文模式：0 = Markdown（发送时自动转为邮件友好 HTML）
+    //            1 = HTML（原样发送）
+    //            2 = 纯文本
+    in-out property <int> body-mode: 0;
+    // 正文编辑区高度（由下方分隔条拖拽调整）
+    in-out property <length> body-height: 320px;
+    in-out property <string> from-display: "";
+    in-out property <bool> sending: false;
+    // 附件
+    in-out property <[string]> attachments: [];
+    in-out property <[string]> attachment-names: [];
+    // i18n
+    in-out property <string> t-send: "发信";
+    in-out property <string> t-attachments: "附件";
+    in-out property <string> t-add-attachment: "添加附件";
+    in-out property <string> t-remove: "移除";
+
+    callback send-mail(string, string, string, int, [string]);
+    callback preview-body(string, int);
+    callback pick-attachment();
+    callback remove-attachment(int);
+
+    VerticalLayout {
+        spacing: 12px;
+        vertical-stretch: 1;
+
+        // ---- 收件人 + 主题（合并为一张卡片，节省纵向空间给正文）----
+        Card { title: "收件人 / 主题";
+            VerticalLayout {
+                spacing: 8px;
+                FieldBox { LineEdit { placeholder-text: "alice@example.com, bob@example.com"; text <=> root.to-text; } }
+                FieldBox { LineEdit { placeholder-text: "邮件主题"; text <=> root.subject-text; } }
+                Text { text: "多个收件人用逗号 / 分号 / 换行分隔"; font-size: 11px; color: Theme.muted; }
+            }
+        }
+
+        // ---- 正文：高度可拖拽调整 ----
+        Card {
+            height: root.body-height;
+            VerticalLayout {
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 9px;
+                    // 标题左侧品牌色竖条（与 Card 自带的标题样式一致）
+                    Rectangle {
+                        width: 3px;
+                        border-radius: 2px;
+                        background: @linear-gradient(180deg, Theme.brand_from 0%, Theme.brand_to 100%);
+                    }
+                    Text {
+                        text: "正文";
+                        font-size: 13px;
+                        font-weight: 700;
+                        color: Theme.fg;
+                        letter-spacing: 0.3px;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    ModeTab { label: "Markdown"; active: root.body-mode == 0; clicked => { root.body-mode = 0; } }
+                    ModeTab { label: "HTML"; active: root.body-mode == 1; clicked => { root.body-mode = 1; } }
+                    ModeTab { label: "纯文本"; active: root.body-mode == 2; clicked => { root.body-mode = 2; } }
+                }
+                FieldBox {
+                    box-height: 60px;
+                    vertical-stretch: 1;
+                    TextEdit { text <=> root.body-text; }
+                }
+            }
+        }
+
+        // ---- 拖拽分隔条：上下拖动调整正文区高度 ----
+        VSplitter {
+            moved(dy) => {
+                root.body-height = Math.max(160px, Math.min(900px, root.body-height + dy));
+            }
+        }
+
+        // ---- 模式说明 / 预览 ----
+        HorizontalLayout {
+            spacing: 10px;
+            Text {
+                text: root.body-mode == 0
+                    ? "Markdown：发送时自动转为带内联样式的 HTML（支持表格、删除线、任务列表）"
+                    : (root.body-mode == 1 ? "HTML：原样发送，样式需自行内联以保证客户端兼容"
+                                           : "纯文本：以 text 字段发送，不含任何排版");
+                font-size: 11px;
+                color: Theme.muted;
+                vertical-alignment: center;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+            if root.body-mode != 2 : PrimaryButton {
+                text: "浏览器预览";
+                subtle: true;
+                clicked => { root.preview-body(root.body-text, root.body-mode); }
+            }
+        }
+
+        // ---- 附件 ----
+        Card { title: root.t-attachments;
+            VerticalLayout {
+                spacing: 6px;
+                if root.attachment-names.length == 0 : Text { text: "无附件"; font-size: 12px; color: Theme.muted; }
+                for name[idx] in root.attachment-names : HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Text {
+                        text: name;
+                        font-size: 12px;
+                        color: Theme.fg;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Rectangle {
+                        width: 60px;
+                        height: 28px;
+                        background: Theme.danger;
+                        border-radius: 8px;
+                        TouchArea { clicked => { root.remove-attachment(idx); } }
+                        Text {
+                            text: root.t-remove;
+                            color: Theme.on_accent;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                PrimaryButton {
+                    text: root.t-add-attachment;
+                    subtle: true;
+                    clicked => { root.pick-attachment(); }
+                }
+            }
+        }
+
+        // ---- 底栏：统计 + 发送 ----
+        Rectangle {
+            VerticalLayout {
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: "本月已发 " + root.month-count + " · 累计已发 " + root.total-count;
+                            font-size: 12px;
+                            color: Theme.fg_secondary;
+                        }
+                        Text {
+                            text: root.plan-label != ""
+                                ? ("套餐「" + root.plan-label + "」 剩余 " + (root.plan-quota - root.month-count) + " / " + root.plan-quota)
+                                : "未设置套餐";
+                            font-size: 12px;
+                            color: root.plan-quota > 0 && (root.plan-quota - root.month-count) <= 0 ? Theme.danger : Theme.success;
+                        }
+                        Text {
+                            text: "发信名称：" + (root.from-display != "" ? root.from-display : "未设置（使用默认）");
+                            font-size: 12px;
+                            color: Theme.accent;
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    PrimaryButton {
+                        text: root.sending ? (root.t-send + "中…") : (root.t-send + "邮件");
+                        enabled: !root.sending;
+                        width: 160px;
+                        clicked => { root.send-mail(root.to-text, root.subject-text, root.body-text, root.body-mode, root.attachments); }
+                    }
+                }
+            }
+        }
+    }
+}

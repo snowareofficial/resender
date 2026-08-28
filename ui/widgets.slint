@@ -1,0 +1,298 @@
+// Copyright (C) 2026~now S.A.
+// SPDX-License-Identifier: MulanPubL-2.0
+
+// ===========================================================================
+//  通用控件：卡片 / 主按钮 / 图标 / 输入框外框 / 导航项 / 窗口控制按钮
+// ===========================================================================
+import { Theme } from "theme.slint";
+
+// 自动化 handler 的输入组件（由脚本通过 api::register_with_fields 声明）
+export struct AutomationField {
+    key: string,
+    label: string,
+    kind: string,   // text | password | bool | multiline
+    value: string,  // 已填写的值（由 Rust 侧回填）
+}
+
+// 自动化 handler 条目（列表展示用）
+export struct AutomationItem {
+    name: string,
+    desc: string,
+    fields: [AutomationField],
+}
+
+// ---------------------------------------------------------------------------
+//  卡片：白底 + 圆角 + 细边框 + 柔和投影；标题带品牌色竖条
+// ---------------------------------------------------------------------------
+export component Card inherits Rectangle {
+    in-out property <string> title;
+    in-out property <length> title-size: 13px;
+
+    background: Theme.surface;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.border;
+    drop-shadow-blur: 10px;
+    drop-shadow-color: Theme.shadow;
+    drop-shadow-offset-y: 2px;
+
+    VerticalLayout {
+        spacing: 10px;
+        padding: 18px;
+        if root.title != "" : HorizontalLayout {
+            spacing: 9px;
+            // 标题左侧品牌色竖条，增强层次与识别度
+            Rectangle {
+                width: 3px;
+                border-radius: 2px;
+                background: @linear-gradient(180deg, Theme.brand_from 0%, Theme.brand_to 100%);
+            }
+            Text {
+                text: root.title;
+                font-size: root.title-size;
+                font-weight: 700;
+                color: Theme.fg;
+                letter-spacing: 0.3px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+        }
+        @children
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  主按钮：品牌渐变 + 投影；悬停提亮、按下压暗
+//  subtle = true 时切换为浅底次级按钮（用于「取消」「刷新」等非主操作）
+// ---------------------------------------------------------------------------
+export component PrimaryButton inherits Rectangle {
+    in-out property <string> text;
+    in-out property <bool> enabled: true;
+    in-out property <bool> subtle: false;
+    callback clicked;
+
+    border-radius: 10px;
+    min-height: 40px;
+    opacity: Theme.opacity;
+
+    background: !root.enabled ? Theme.border
+        : root.subtle ? Theme.surface_alt
+        : @linear-gradient(90deg, Theme.brand_from 0%, Theme.brand_to 100%);
+    border-width: root.subtle ? 1px : 0px;
+    border-color: Theme.border_strong;
+
+    drop-shadow-blur: root.enabled && !root.subtle ? 8px : 0px;
+    drop-shadow-color: Theme.shadow;
+    drop-shadow-offset-y: 2px;
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    // 交互反馈层：悬停叠白提亮，按下叠黑压暗
+    Rectangle {
+        border-radius: parent.border-radius;
+        background: ta.pressed ? #00000024 : (ta.has-hover ? #ffffff30 : #00000000);
+    }
+
+    Text {
+        text: root.text;
+        color: !root.enabled ? Theme.muted : (root.subtle ? Theme.fg : Theme.on_accent);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+    }
+}
+
+// 矢量图标（Lucide 图标库 path 数据，24x24 视图坐标系，描边风格）
+export component NavIcon inherits Path {
+    in-out property <color> tint;
+    width: 22px;
+    height: 22px;
+    fill: transparent;
+    stroke: root.tint;
+    stroke-width: 2px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+}
+
+// ---------------------------------------------------------------------------
+//  输入框外框：为原生 LineEdit/TextEdit/ComboBox 提供清晰可见的背景与边框
+//  （原生控件自身背景在部分渲染后端下与窗口同色，导致"看不见"）
+// ---------------------------------------------------------------------------
+export component FieldBox inherits Rectangle {
+    in-out property <length> box-height: 40px;
+    background: Theme.field_bg;
+    border-color: Theme.field_border;
+    border-width: 1px;
+    border-radius: 10px;
+    // 用 min-height 而非 height：无拉伸时即为基础高度，
+    // 父布局分配 vertical-stretch 时可继续长高（如正文输入框填满剩余空间）
+    min-height: root.box-height;
+    clip: true;
+    VerticalLayout {
+        padding: 0px;
+        @children
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  导航项（竖向）：选中态为品牌渐变 + 左侧指示条；悬停为浅色底
+// ---------------------------------------------------------------------------
+export component NavItem inherits Rectangle {
+    in-out property <string> icon;
+    in-out property <string> label;
+    in-out property <bool> active: false;
+    in-out property <bool> collapsed: false;
+    callback clicked;
+
+    border-radius: 10px;
+    min-height: 46px;
+    background: root.active
+        ? @linear-gradient(90deg, Theme.brand_from 0%, Theme.brand_to 100%)
+        : (ta.has-hover ? Theme.accent_soft : #00000000);
+
+    ta := TouchArea { clicked => { root.clicked(); } }
+
+    HorizontalLayout {
+        spacing: root.collapsed ? 0px : 12px;
+        padding-left: root.collapsed ? 0px : 13px;
+        padding-right: root.collapsed ? 0px : 12px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        // 收起状态下图标水平居中；展开状态下图标+文字左对齐
+        alignment: root.collapsed ? center : start;
+
+        NavIcon {
+            tint: root.active ? Theme.on_accent : Theme.fg_secondary;
+            commands: root.icon;
+            width: 22px;
+            height: 22px;
+        }
+        if !root.collapsed : Text {
+            text: root.label;
+            color: root.active ? Theme.on_accent : Theme.fg;
+            font-size: 14px;
+            vertical-alignment: center;
+            font-weight: root.active ? 600 : 400;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  窗口控制按钮（矢量 Path 绘制，保证在任意字体下都可见）
+// ---------------------------------------------------------------------------
+export component CtrlButton inherits Rectangle {
+    in-out property <string> cmd;   // SVG path 命令
+    in-out property <bool> filled: false;
+    callback clicked;
+    width: 38px;
+    height: 32px;
+    border-radius: 8px;
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    background: ta.pressed ? #0000001f : (ta.has-hover ? #ffffff66 : #00000000);
+    Path {
+        commands: root.cmd;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        stroke: Theme.fg;
+        stroke-width: 1.8px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: root.filled ? Theme.fg : #00000000;
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  窗口控制按钮组（按平台决定位置：macOS 在左，win/linux 在右）
+//  注意：不要设定固定 width，否则容器被压成 0 宽导致按钮不可见
+// ---------------------------------------------------------------------------
+export component WindowControls inherits Rectangle {
+    in-out property <string> platform: "windows";
+    callback minimize;
+    callback toggle-maximize;
+    callback quit;
+    callback advanced;
+    height: 32px;
+    HorizontalLayout {
+        spacing: 3px;
+        if root.platform == "macos" : CtrlButton { cmd: "M6 6 L18 18 M18 6 L6 18"; clicked => { root.quit(); } }
+        if root.platform == "macos" : CtrlButton { cmd: "M6 12 H18"; clicked => { root.minimize(); } }
+        if root.platform == "macos" : CtrlButton { cmd: "M5 5 H19 V19 H5 Z"; clicked => { root.toggle-maximize(); } }
+        if root.platform == "macos" : CtrlButton { cmd: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"; clicked => { root.advanced(); } }
+        if root.platform != "macos" : CtrlButton { cmd: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"; clicked => { root.advanced(); } }
+        if root.platform != "macos" : CtrlButton { cmd: "M6 12 H18"; clicked => { root.minimize(); } }
+        if root.platform != "macos" : CtrlButton { cmd: "M5 5 H19 V19 H5 Z"; clicked => { root.toggle-maximize(); } }
+        if root.platform != "macos" : CtrlButton { cmd: "M6 6 L18 18 M18 6 L6 18"; clicked => { root.quit(); } }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  垂直拖拽分隔条（splitter）：上下拖拽调整相邻区域的高度
+//  moved 回调上报相对上一次事件的**增量**（向下为正），由父组件自行夹取范围
+// ---------------------------------------------------------------------------
+export component VSplitter inherits Rectangle {
+    callback moved(length);
+    height: 12px;
+    background: ta.has-hover ? Theme.accent_soft : #00000000;
+
+    ta := TouchArea {
+        property <length> last-y: 0px;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.left) {
+                if (e.kind == PointerEventKind.down) {
+                    last-y = self.mouse-y;
+                } else if (e.kind == PointerEventKind.move && self.pressed) {
+                    root.moved(self.mouse-y - last-y);
+                    last-y = self.mouse-y;
+                }
+            }
+        }
+        mouse-cursor: ns-resize;
+    }
+
+    // 中央抓手：悬停时显示品牌色，提示可拖拽
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 44px;
+        height: 3px;
+        border-radius: 2px;
+        background: ta.has-hover ? Theme.brand_from : Theme.border_strong;
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  模式切换小标签（用于正文的 Markdown / HTML / 纯文本 切换）
+// ---------------------------------------------------------------------------
+export component ModeTab inherits Rectangle {
+    in-out property <string> label;
+    in-out property <bool> active: false;
+    callback clicked;
+
+    height: 28px;
+    min-width: 72px;
+    border-radius: 8px;
+    background: root.active
+        ? @linear-gradient(90deg, Theme.brand_from 0%, Theme.brand_to 100%)
+        : (ta.has-hover ? Theme.accent_soft : Theme.surface_alt);
+
+    ta := TouchArea { clicked => { root.clicked(); } }
+
+    Text {
+        text: root.label;
+        font-size: 12px;
+        font-weight: root.active ? 600 : 400;
+        color: root.active ? Theme.on_accent : Theme.fg_secondary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}

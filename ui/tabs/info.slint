@@ -1,0 +1,118 @@
+// ===========================================================================
+//  关于页：品牌、版本、技术栈、组织标识、许可信息
+// ===========================================================================
+import { AboutSlint } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Card } from "../widgets.slint";
+
+export component InfoTab inherits Rectangle {
+    in-out property <string> sorg-banner: "";
+    // 版本由外层从 Cargo.toml（CARGO_PKG_VERSION）注入；此处仅为兜底缺省值
+    in-out property <string> app-version: "0.0.0";
+
+    VerticalLayout {
+        spacing: 16px;
+        alignment: center;
+        vertical-stretch: 1;
+
+        HorizontalLayout {
+            spacing: 16px;
+            alignment: start;
+            Image { source: @image-url("../../assets/logo.png"); width: 96px; height: 96px; }
+            VerticalLayout {
+                spacing: 4px;
+                alignment: center;
+                Text { text: "SWE::Resender"; font-size: 22px; font-weight: 700; color: Theme.fg; }
+                Text { text: "Rhai 驱动的 Resend 发信工具"; font-size: 13px; color: Theme.muted; }
+                Text { text: "版本 " + root.app-version; font-size: 12px; color: Theme.muted; }
+            }
+        }
+
+        Rectangle { height: 1px; background: Theme.border; }
+
+        Card { title: "技术栈";
+            VerticalLayout {
+                spacing: 4px;
+                Text { text: "• Slint — 跨平台 GUI"; font-size: 12px; color: Theme.fg; }
+                Text { text: "• Rhai — 嵌入式脚本引擎（全部业务动态驱动）"; font-size: 12px; color: Theme.fg; }
+                Text { text: "• libsmx — 国密 SM4-GCM / SM3 加密"; font-size: 12px; color: Theme.fg; }
+                Text { text: "• reqwest + Resend REST API"; font-size: 12px; color: Theme.fg; }
+                Text { text: "• MiSans VF — 小米可变字体（界面默认字体）"; font-size: 12px; color: Theme.fg; }
+            }
+        }
+
+        // Slint 官方标识（点击跳转 slint.dev）
+        Card { title: "Made with Slint";
+            VerticalLayout {
+                spacing: 8px;
+                alignment: center;
+                AboutSlint { }
+                Text {
+                    text: "Slint 采用三重许可：GPL-3.0-only / LicenseRef-Slint-Royalty-free-2.0 / LicenseRef-Slint-Software-3.0";
+                    font-size: 10px;
+                    color: Theme.muted;
+                    wrap: word_wrap;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "本项目选用 LicenseRef-Slint-Royalty-free-2.0（Slint Royalty-free）";
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: Theme.accent;
+                    wrap: word_wrap;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        Card { title: "许可信息";
+            VerticalLayout {
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text { text: "Resender:"; font-size: 12px; font-weight: 600; color: Theme.fg; }
+                    Text { text: "MulanPubL V2（Mulan Public License, Version 2）"; font-size: 12px; color: Theme.fg; wrap: word_wrap; }
+                }
+                Text { text: "SPDX-License-Identifier: MulanPubL-2.0"; font-size: 11px; color: Theme.muted; font-family: Theme.font_mono; }
+                Rectangle { height: 1px; background: Theme.border; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text { text: "Slint:"; font-size: 12px; font-weight: 600; color: Theme.fg; }
+                    Text { text: "LicenseRef-Slint-Royalty-free-2.0"; font-size: 12px; color: Theme.fg; wrap: word_wrap; }
+                }
+                Text { text: "Copyright (C) SixtyFPS GmbH <info@slint.dev>"; font-size: 11px; color: Theme.muted; font-family: Theme.font_mono; }
+                Rectangle { height: 1px; background: Theme.border; }
+                // MiSans 许可协议第 2 条第 1 款要求：应在软件中特别注明使用了 MiSans 字体
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text { text: "字体:"; font-size: 12px; font-weight: 600; color: Theme.fg; }
+                    Text {
+                        text: "本软件界面使用小米 MiSans VF 字体（小米科技有限责任公司，保留所有权利）";
+                        font-size: 12px;
+                        color: Theme.fg;
+                        wrap: word_wrap;
+                    }
+                }
+                Text {
+                    text: "MiSans 受《MiSans字体知识产权许可协议》约束，完整条款见 ui/font-license.txt";
+                    font-size: 11px;
+                    color: Theme.muted;
+                    wrap: word_wrap;
+                }
+            }
+        }
+
+        Card { title: "组织标识";
+            VerticalLayout {
+                spacing: 4px;
+                HorizontalLayout {
+                    spacing: 0px;
+                    Text { text: "<<*>> SOrg :: -^v- "; font-size: 13px; font-weight: 700; color: Theme.sorg-left; font-family: Theme.font_mono; }
+                    Text { text: "SNOWARE"; font-size: 13px; font-weight: 700; color: Theme.sorg-right; font-family: Theme.font_mono; }
+                }
+                Text { text: "Copyright (C) 2026 ~ now S.A."; font-size: 12px; color: Theme.fg; font-family: Theme.font_mono; }
+                Text { text: "Licensed under MulanPubL V2 (Mulan Public License, Version 2)."; font-size: 12px; color: Theme.muted; font-family: Theme.font_mono; }
+            }
+        }
+    }
+}

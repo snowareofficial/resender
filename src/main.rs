@@ -1,0 +1,1038 @@
+// Copyright (C) 2026~now S.A.
+// SPDX-License-Identifier: MulanPubL-2.0
+
+//![allow(non_snake_case)]
+//! Resender — Rhai 驱动的发信工具
+//!
+//! 架构：Rust 仅注册安全原语（http / crypto / store / ui），
+//! 所有业务逻辑（身份获取、禁止判定、发信、统计）由 Rhai 脚本动态拼装。
+//!
+//! SOrg / SNOWARE 标识（仅展示，不绑定具体组织）：
+//!   <<*>> SOrg :: -^v- SNOWARE
+//!   Copyright (C) 2026~now S.A. Licensed under Mulan PubL v2.
+
+mod config;
+mod crypto;
+mod history;
+mod log;
+mod markdown;
+mod rhai_ext;
+
+use anyhow::Result;
+use base64::Engine as _;
+use slint::{Model, ModelRc, VecModel};
+use std::rc::Rc;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use config::{AppConfig, PLANS, compute_quota, gregorian_std};
+use history::HistoryStore;
+use rhai_ext::{RhaiContext, SORG_BANNER, build_engine, compile_script, make_scope};
+
+/// 应用版本：唯一来源为 Cargo.toml 的 `version`（编译期展开）。
+/// GUI 关于页与 CLI `--version` 均读取此常量，发版后自动同步。
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 全局 Rhai 上下文（供原语模块通过 RHAI_CTX.get() 访问）
+pub static RHAI_CTX: std::sync::OnceLock<Arc<RhaiContext>> = std::sync::OnceLock::new();
+
+slint::include_modules!();
+
+fn ss<S: Into<slint::SharedString>>(s: S) -> slint::SharedString {
+    s.into()
+}
+
+fn now_iso_string() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let days = (secs / 86400) as i64 + 719163;
+    let (y, m, d) = gregorian_std(days);
+    let hh = (secs % 86400) / 3600;
+    let mm = (secs % 3600) / 60;
+    let ss = secs % 60;
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, hh, mm, ss)
+}
+
+fn scripts_dir() -> PathBuf {
+    // 优先使用可执行文件同级的 scripts/，否则用源码 scripts/
+    let exe = std::env::current_exe().unwrap_or_default();
+    if let Some(dir) = exe.parent() {
+        let p = dir.join("scripts").join("default.rhai");
+        if p.exists() {
+            return p;
+        }
+    }
+    let mut p = std::env::current_dir().unwrap_or_default();
+    p.push("scripts");
+    p.push("default.rhai");
+    p
+}
+
+/// 构建引擎、Rhai 上下文、编译脚本（GUI 与 CLI 共用）
+fn setup() -> Result<(Arc<rhai::Engine>, rhai::AST, Arc<RhaiContext>, PathBuf)> {
+    let history = Arc::new(HistoryStore::new()?);
+    let ctx = Arc::new(RhaiContext::new(history)?);
+    let _ = RHAI_CTX.set(ctx.clone());
+
+    let mut engine = build_engine();
+    engine.register_fn("rust_now_iso", now_iso_string);
+    engine.register_fn("parse_json", |s: &str| -> rhai::Dynamic {
+        match serde_json::from_str::<serde_json::Value>(s) {
+            Ok(v) => rhai::serde::to_dynamic(v).unwrap_or(rhai::Dynamic::UNIT),
+            Err(_) => rhai::Dynamic::UNIT,
+        }
+    });
+    let engine = Arc::new(engine);
+
+    let script_path = scripts_dir();
+    let ast = compile_script(&engine, &script_path)?;
+    // 执行一次脚本顶层语句：触发 api::register 等初始化（i18n/主题/自动化注册）
+    if let Err(e) = engine.run_ast(&ast) {
+        eprintln!("脚本初始化执行警告: {e}");
+    }
+    // 让原语模块（api::call）能拿到引擎与脚本 AST 引用
+    let _ = ctx.engine.set(engine.clone());
+    let _ = ctx.ast.set(ast.clone().into());
+    Ok((engine, ast, ctx, script_path))
+}
+
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    // 命令行调用功能（无 GUI）
+    if args.len() > 1 && (args[1] == "send" || args[1] == "run" || args[1] == "help" || args[1] == "--help" || args[1] == "-h"
+        || args[1] == "version" || args[1] == "--version" || args[1] == "-V") {
+        return run_cli(&args[1..]);
+    }
+
+    let (engine, ast, ctx, script_path) = setup()?;
+
+    // UI
+    let ui = App::new()?;
+    // 强制原生控件（输入框/复选框等）使用浅色配色方案，
+    // 避免系统处于暗色模式时它们渲染成白字而与浅色背景冲突。
+    ui.set_color_scheme(slint::private_unstable_api::re_exports::ColorScheme::Light);
+    // 版本取自 Cargo.toml（APP_VERSION），发版后自动同步，无需在 UI 里手改
+    ui.set_app_version(ss(APP_VERSION));
+    let cfg = AppConfig::load();
+
+    // 平台检测：用于决定窗口控制按钮的位置/顺序（≥3 平台）
+    let platform = match std::env::consts::OS {
+        "macos" => "macos",
+        "windows" => "windows",
+        "linux" => "linux",
+        other => other,
+    };
+    ui.set_platform(ss(platform));
+
+    // 初始化套餐列表
+    let plan_strings: Vec<slint::SharedString> =
+        PLANS.iter().map(|(n, _)| slint::SharedString::from(n.to_string())).collect();
+    let model = Rc::new(VecModel::from(plan_strings));
+    ui.set_plans(ModelRc::from(model.clone()));
+
+    // 周期重置检查
+    let mut cfg = cfg;
+    let cycle_key = if cfg.cycle_start.is_empty() {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let days = (secs / 86400) as i64 + 719163;
+        let (y, m, _) = gregorian_std(days);
+        format!("{:04}-{:02}-01", y, m)
+    } else {
+        cfg.cycle_start.clone()
+    };
+    if cfg.cycle_mark != cycle_key {
+        cfg.month_count = 0;
+        cfg.cycle_mark = cycle_key.clone();
+        let _ = cfg.save();
+    }
+
+    // 反映到 UI
+    ui.set_api_key(ss(cfg.api_key.clone()));
+    ui.set_from_name(ss(cfg.from_name.clone()));
+    ui.set_plan_index(cfg.plan_index as i32);
+    ui.set_custom_quota_text(ss(cfg.custom_quota.to_string()));
+    ui.set_cycle_start(ss(cfg.cycle_start.clone()));
+    ui.set_month_count(cfg.month_count as i32);
+    ui.set_total_count(cfg.total_count as i32);
+    ui.set_from_display(ss(cfg.from_name.clone()));
+
+    let quota = compute_quota(cfg.plan_index, cfg.custom_quota);
+    ui.set_plan_quota(quota as i32);
+    ui.set_plan_label(ss(PLANS.get(cfg.plan_index).map(|(n, _)| (*n).to_string()).unwrap_or_default()));
+
+    // 设置脚本页面文本
+    ui.set_script_path(ss(script_path.to_string_lossy().to_string()));
+    ui.set_sorg_banner(ss(SORG_BANNER));
+
+    // 刷新历史列表
+    refresh_history(&ui, &ctx);
+    // 刷新运行日志（内存 + 加密落盘文件）
+    refresh_logs_ui_inner(&ui, &ctx);
+    // 刷新自动化 handler 列表（脚本在加载时已注册）
+    ui.set_automation_items(ModelRc::from(Rc::new(VecModel::from(automation_items(&ctx)))));
+
+    // 启动时执行脚本初始化（i18n / 默认主题），让界面文本立即生效
+    {
+        let mut scope = make_scope();
+        let _ = engine.call_fn::<()>(&mut scope, &ast, "setup_i18n", ());
+        let _ = engine.call_fn::<()>(&mut scope, &ast, "apply_theme", (false,));
+    }
+
+    // 应用脚本定义的 i18n / 主题 / 暗色 / 透明度
+    apply_ui_state(&ui, &ctx);
+
+    // 初始界面状态（导航/专注，从 config 读取）
+    ui.set_nav_collapsed(cfg.nav_collapsed);
+    ui.set_zen_mode(cfg.zen_mode);
+
+    // 信任设置反映到 UI（密码不回填 UI，仅回填启用/模式/公钥）
+    ui.set_trust_enabled(cfg.script_trust_enabled);
+    ui.set_sig_mode(ss(cfg.script_sig_verify.clone()));
+    ui.set_pubkey(ss(cfg.script_pubkey.clone()));
+    ui.set_trust_unlocked(false);
+
+    // ---- 保存设置（仍走 Rust，因为涉及 UI 字段 <-> config 映射）----
+    let ui_weak = ui.as_weak();
+    let ctx_save = ctx.clone();
+    ui.on_save_settings(move |api_key, from_name, crypto_password, plan_index, enc_apikey, enc_from, custom_quota_text, cycle_start| {
+        let custom_quota: i64 = custom_quota_text.trim().parse().unwrap_or(0);
+        let mut c = AppConfig::load();
+        let mut api_key_out = api_key.to_string();
+        let mut api_enc = false;
+        if enc_apikey && !crypto_password.is_empty() {
+            match crypto::encrypt_with_password(&api_key, &crypto_password) {
+                Ok(s) => { api_key_out = s; api_enc = true; }
+                Err(e) => {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_status_text(ss(format!("加密失败: {e}")));
+                        ui.set_status_err(true);
+                    }
+                    return;
+                }
+            }
+        }
+        let mut from_out = from_name.to_string();
+        let mut from_enc = false;
+        if enc_from && !from_name.is_empty() && !crypto_password.is_empty() {
+            match crypto::encrypt_with_password(&from_name, &crypto_password) {
+                Ok(s) => { from_out = s; from_enc = true; }
+                Err(e) => {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_status_text(ss(format!("加密失败: {e}")));
+                        ui.set_status_err(true);
+                    }
+                    return;
+                }
+            }
+        }
+        c.api_key = api_key_out;
+        c.api_key_enc = api_enc;
+        c.from_name = from_out;
+        c.from_name_enc = from_enc;
+        c.plan_index = plan_index as usize;
+        c.custom_quota = custom_quota;
+        c.cycle_start = cycle_start.to_string();
+
+        // 信任设置（从 UI 读取，单独获取）
+        if let Some(ui) = ui_weak.upgrade() {
+            c.script_trust_enabled = ui.get_trust_enabled();
+            c.script_trust_password = ui.get_trust_password().to_string();
+            c.script_sig_verify = ui.get_sig_mode().to_string();
+            c.script_pubkey = ui.get_pubkey().to_string();
+        }
+
+        // 记忆密码供脚本使用（解锁）
+        *ctx_save.crypto_password.lock().unwrap() = crypto_password.to_string();
+
+        match c.save() {
+            Ok(_) => {
+                if let Some(ui) = ui_weak.upgrade() {
+                    let quota = compute_quota(c.plan_index, c.custom_quota);
+                    ui.set_plan_quota(quota as i32);
+                    ui.set_plan_label(ss(PLANS.get(c.plan_index).map(|(n,_)| (*n).to_string()).unwrap_or_default()));
+                    ui.set_status_text(ss("设置已保存"));
+                    ui.set_status_err(false);
+                    ui.set_unlocked(!crypto_password.is_empty());
+                }
+            }
+            Err(e) => {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_status_text(ss(format!("保存失败: {e}")));
+                    ui.set_status_err(true);
+                }
+            }
+        }
+    });
+
+    // ---- 解锁：记忆密码供脚本读取 ----
+    let ui_weak2 = ui.as_weak();
+    let ctx_unlock = ctx.clone();
+    ui.on_unlock(move |pwd| {
+        *ctx_unlock.crypto_password.lock().unwrap() = pwd.to_string();
+        if let Some(ui) = ui_weak2.upgrade() {
+            ui.set_unlocked(!pwd.is_empty());
+        }
+    });
+
+    // ---- 脚本信任解锁：先持久化 UI 信任字段，再比对密码（必要时验签）----
+    let ui_weak_t = ui.as_weak();
+    let script_path_t = script_path.clone();
+    ui.on_unlock_trust(move |pwd, sig_hex| {
+        // 先把 UI 上的信任设置落盘，确保 unlock 读到的 config 与 UI 一致
+        if let Some(ui) = ui_weak_t.upgrade() {
+            let mut c = AppConfig::load();
+            c.script_trust_enabled = ui.get_trust_enabled();
+            c.script_trust_password = ui.get_trust_password().to_string();
+            c.script_sig_verify = ui.get_sig_mode().to_string();
+            c.script_pubkey = ui.get_pubkey().to_string();
+            let _ = c.save();
+        }
+        let src = std::fs::read_to_string(&script_path_t).unwrap_or_default();
+        let res = rhai_ext::trust_primitives::unlock(&pwd, &src, &sig_hex);
+        let s = res.to_string();
+        let ok = s.is_empty();
+        if let Some(ui) = ui_weak_t.upgrade() {
+            ui.set_trust_unlocked(ok);
+            ui.set_status_text(ss(if ok { "脚本已受信任，功能已开放" } else { &s }));
+            ui.set_status_err(!ok);
+        }
+    });
+
+    // ---- 信任锁定：撤销信任态 ----
+    let ui_weak_tl = ui.as_weak();
+    let ctx_lock = ctx.clone();
+    ui.on_lock_trust(move || {
+        *ctx_lock.trusted.lock().unwrap() = false;
+        *ctx_lock.trust_password.lock().unwrap() = String::new();
+        if let Some(ui) = ui_weak_tl.upgrade() {
+            ui.set_trust_unlocked(false);
+            ui.set_status_text(ss("已锁定脚本信任"));
+            ui.set_status_err(false);
+        }
+    });
+
+    // ---- 发送（调用 Rhai 脚本 send_mail）----
+    let ui_weak3 = ui.as_weak();
+    let engine_send = engine.clone();
+    let ast_send = ast.clone();
+    let ctx_send = ctx.clone();
+    ui.on_send_mail(move |to_text, subject, body, mode, attachments| {
+        let pw = ctx_send.crypto_password.lock().unwrap().clone();
+        let mut scope = make_scope();
+        // 设置全局 crypto_password
+        scope.push("crypto_password", pw.clone());
+        let to_s = to_text.to_string();
+        let subj_s = subject.to_string();
+        let body_s = body.to_string();
+        // 按正文模式决定最终发送内容与是否为 HTML
+        let (final_body, html_b) = resolve_body(&body_s, mode);
+
+        // 读取附件并编码为 base64，注入脚本
+        let mut attach_list: Vec<rhai::Dynamic> = Vec::new();
+        for path_str in attachments.iter() {
+            let p = std::path::Path::new(path_str.as_str());
+            match std::fs::read(p) {
+                Ok(bytes) => {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    let filename = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    let mut m = rhai::Map::new();
+                    m.insert("filename".into(), filename.into());
+                    m.insert("content".into(), b64.into());
+                    attach_list.push(rhai::Dynamic::from(m));
+                }
+                Err(e) => {
+                    if let Some(ui) = ui_weak3.upgrade() {
+                        ui.set_status_text(ss(format!("读取附件失败: {e}")));
+                        ui.set_status_err(true);
+                    }
+                    return;
+                }
+            }
+        }
+
+        let ui_send = ui_weak3.clone();
+        let eng = engine_send.clone();
+        let ast_c = ast_send.clone();
+        let ctx_spawn = ctx_send.clone();
+        std::thread::spawn(move || {
+            let result: Result<(), Box<dyn std::error::Error>> = (|| {
+                eng.call_fn(&mut scope, &ast_c, "send_mail",
+                    (to_s, subj_s, final_body, html_b, pw, attach_list))?;
+                Ok(())
+            })();
+            // 读取状态
+            let (status, is_err) = ctx_spawn.status.lock().unwrap().clone();
+            if let Some(ui) = ui_send.upgrade() {
+                ui.set_status_text(ss(status));
+                ui.set_status_err(is_err);
+                // 刷新计数 + 历史
+                let c = AppConfig::load();
+                ui.set_month_count(c.month_count as i32);
+                ui.set_total_count(c.total_count as i32);
+                refresh_history_ui(&ui, &ctx_spawn);
+                // 刷新运行日志
+                refresh_logs_ui_inner(&ui, &ctx_spawn);
+            }
+            if let Err(e) = result {
+                if let Some(ui) = ui_send.upgrade() {
+                    ui.set_status_text(ss(format!("脚本执行错误: {e}")));
+                    ui.set_status_err(true);
+                }
+            }
+        });
+    });
+
+    // ---- 正文预览：生成 HTML 写入临时文件，用系统默认浏览器打开 ----
+    // Slint 没有 HTML 渲染组件，交给浏览器才能真正反映收件方看到的排版
+    let ui_weak_preview = ui.as_weak();
+    ui.on_preview_body(move |body, mode| {
+        let body_s = body.to_string();
+        let html = match mode {
+            0 => crate::markdown::to_html(&body_s),
+            1 => body_s.clone(),
+            // 纯文本：包一层最小 HTML，转义后放进 <pre> 以保留换行
+            _ => format!(
+                "<!DOCTYPE html><html><body><pre style=\"font-family: Consolas, \
+                 monospace; white-space: pre-wrap; padding: 20px;\">{}\
+                 </pre></body></html>",
+                html_escape(&body_s)
+            ),
+        };
+        let path = std::env::temp_dir().join("resender_preview.html");
+        let (text, is_err) = match std::fs::write(&path, &html).and_then(|_| open_in_browser(&path)) {
+            Ok(()) => (format!("已在浏览器打开预览：{}", path.display()), false),
+            Err(e) => (format!("预览失败：{e}"), true),
+        };
+        if let Some(ui) = ui_weak_preview.upgrade() {
+            ui.set_status_text(ss(text));
+            ui.set_status_err(is_err);
+        }
+    });
+
+    // ---- 选择附件 ----
+    let ui_weak_attach = ui.as_weak();
+    ui.on_pick_attachment(move || {
+        if let Some(path) = rfd::FileDialog::new().pick_file() {
+            if let Some(ui) = ui_weak_attach.upgrade() {
+                let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string_lossy().to_string());
+                let mut paths: Vec<slint::SharedString> = ui.get_attachments().iter().collect();
+                let mut names: Vec<slint::SharedString> = ui.get_attachment_names().iter().collect();
+                paths.push(slint::SharedString::from(path.to_string_lossy().to_string()));
+                names.push(slint::SharedString::from(name));
+                ui.set_attachments(ModelRc::from(Rc::new(VecModel::from(paths))));
+                ui.set_attachment_names(ModelRc::from(Rc::new(VecModel::from(names))));
+            }
+        }
+    });
+
+    // ---- 移除附件 ----
+    let ui_weak_remove = ui.as_weak();
+    ui.on_remove_attachment(move |idx| {
+        if let Some(ui) = ui_weak_remove.upgrade() {
+            let mut paths: Vec<slint::SharedString> = ui.get_attachments().iter().collect();
+            let mut names: Vec<slint::SharedString> = ui.get_attachment_names().iter().collect();
+            if (idx as usize) < paths.len() {
+                paths.remove(idx as usize);
+                names.remove(idx as usize);
+                ui.set_attachments(ModelRc::from(Rc::new(VecModel::from(paths))));
+                ui.set_attachment_names(ModelRc::from(Rc::new(VecModel::from(names))));
+            }
+        }
+    });
+
+    // ---- 重新加载脚本 ----
+    let ui_weak4 = ui.as_weak();
+    let engine_reload = engine.clone();
+    let ctx_reload = ctx.clone();
+    ui.on_reload_script(move || {
+        let p = scripts_dir();
+        match compile_script(&engine_reload, &p) {
+            Ok(_) => {
+                if let Some(ui) = ui_weak4.upgrade() {
+                    ui.set_status_text(ss("脚本已重新加载"));
+                    ui.set_status_err(false);
+                    // 重新加载后刷新自动化列表（脚本会重新注册 handler）
+                    ui.set_automation_items(ModelRc::from(Rc::new(VecModel::from(
+                        automation_items(&ctx_reload),
+                    ))));
+                }
+            }
+            Err(e) => {
+                if let Some(ui) = ui_weak4.upgrade() {
+                    ui.set_status_text(ss(format!("脚本加载失败: {e}")));
+                    ui.set_status_err(true);
+                }
+            }
+        }
+    });
+
+    // ---- 刷新自动化 handler 列表（含脚本声明的输入组件）----
+    let ctx_list = ctx.clone();
+    let ui_list = ui.as_weak();
+    ui.on_refresh_automations(move || {
+        let items = automation_items(&ctx_list);
+        if let Some(ui) = ui_list.upgrade() {
+            ui.set_automation_items(ModelRc::from(Rc::new(VecModel::from(items))));
+        }
+    });
+
+    // ---- 记录某个 handler 输入组件的值 ----
+    let ctx_fv = ctx.clone();
+    ui.on_set_field_value(move |name, key, value| {
+        ctx_fv.field_values.lock().unwrap().insert(
+            (name.to_string(), key.to_string()),
+            value.to_string(),
+        );
+    });
+
+    // ---- 运行一个自动化 handler（参数来自界面填写的输入组件）----
+    let ctx_run = ctx.clone();
+    let engine_run = engine.clone();
+    let ast_run = ast.clone(); // rhai::AST（owned）
+    let ui_run = ui.as_weak();
+    ui.on_run_automation(move |name| {
+        let name_s = name.to_string();
+        let args = collect_field_args(&ctx_run, &name_s);
+        let (ok, msg) = run_automation(&*engine_run, &ast_run, &ctx_run, &name_s, args);
+        if let Some(ui) = ui_run.upgrade() {
+            ui.set_status_text(ss(format!("[自动化] {name}: {msg}")));
+            ui.set_status_err(!ok);
+            ui.set_automation_result(ss(msg));
+            ui.set_automation_err(!ok);
+            // 刷新运行日志
+            refresh_logs_ui_inner(&ui, &ctx_run);
+        }
+    });
+
+    // ---- 刷新运行日志（内存缓冲 + 加密落盘文件解密读取）----
+    let ctx_logs = ctx.clone();
+    let ui_logs = ui.as_weak();
+    ui.on_refresh_logs(move || {
+        refresh_logs_ui(&ui_logs, &ctx_logs);
+    });
+
+    // ---- 清空日志（内存 + 加密文件一并清除）----
+    let ctx_clear_logs = ctx.clone();
+    let ui_clear_logs = ui.as_weak();
+    ui.on_clear_logs(move || {
+        ctx_clear_logs.logs.lock().unwrap().clear();
+        let _ = ctx_clear_logs.log_store.clear();
+        if let Some(ui) = ui_clear_logs.upgrade() {
+            refresh_logs_ui_inner(&ui, &ctx_clear_logs);
+            ui.set_status_text(ss("运行日志已清空"));
+            ui.set_status_err(false);
+        }
+    });
+
+    // ---- 清空历史（带二次确认）----
+    let ctx_clear = ctx.clone();
+    let ui_clear = ui.as_weak();
+    ui.on_clear_history(move || {
+        ctx_clear.history.clear();
+        if let Some(ui) = ui_clear.upgrade() {
+            refresh_history_ui(&ui, &ctx_clear);
+            ui.set_status_text(ss("发信历史已清空"));
+            ui.set_status_err(false);
+        }
+    });
+
+    // ---- 切换亮/暗主题（调用 Rhai apply_theme）----
+    let ui_weak5 = ui.as_weak();
+    let engine_theme = engine.clone();
+    let ast_theme = ast.clone();
+    let ctx_toggle = ctx.clone();
+    ui.on_toggle_theme(move || {
+        let new_dark = !*ctx_toggle.dark_mode.lock().unwrap();
+        let mut scope = make_scope();
+        let result: Result<(), Box<dyn std::error::Error>> = (|| {
+            engine_theme.call_fn(&mut scope, &ast_theme, "apply_theme", (new_dark,))?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            if let Some(ui) = ui_weak5.upgrade() {
+                ui.set_status_text(ss(format!("主题切换失败: {e}")));
+                ui.set_status_err(true);
+            }
+            return;
+        }
+        if let Some(ui) = ui_weak5.upgrade() {
+            apply_ui_state(&ui, &ctx_toggle);
+        }
+    });
+
+    // ---- 窗口控制回调（无边框窗口，使用 Slint Window API）----
+    let ui_min = ui.as_weak();
+    ui.on_minimize(move || {
+        if let Some(ui) = ui_min.upgrade() {
+            ui.window().set_minimized(true);
+        }
+    });
+    let ui_max = ui.as_weak();
+    ui.on_toggle_maximize(move || {
+        if let Some(ui) = ui_max.upgrade() {
+            let w = ui.window();
+            w.set_maximized(!w.is_maximized());
+        }
+    });
+    ui.on_quit(|| { std::process::exit(0); });
+
+    // ---- 窗口拖动（无边框下通过顶栏拖动）----
+    let ui_drag = ui.as_weak();
+    ui.on_drag_window(move |dx, dy| {
+        if let Some(ui) = ui_drag.upgrade() {
+            let w = ui.window();
+            let pos = w.position();
+            let sf = w.scale_factor() as f64;
+            let np = slint::PhysicalPosition::new(
+                (pos.x as f64 + dx as f64 * sf) as i32,
+                (pos.y as f64 + dy as f64 * sf) as i32,
+            );
+            w.set_position(slint::WindowPosition::Physical(np));
+        }
+    });
+
+    // ---- 高级面板开关 ----
+    let ui_adv = ui.as_weak();
+    ui.on_advanced(move || {
+        if let Some(ui) = ui_adv.upgrade() {
+            ui.set_advanced_open(!ui.get_advanced_open());
+        }
+    });
+
+    // ---- 导航收起 / 专注模式（快捷键触发）----
+    let ui_nav = ui.as_weak();
+    ui.on_toggle_nav(move || {
+        let new_v = !ui_nav.upgrade().map(|u| u.get_nav_collapsed()).unwrap_or(false);
+        let mut c = AppConfig::load();
+        c.nav_collapsed = new_v;
+        let _ = c.save();
+        if let Some(ui) = ui_nav.upgrade() {
+            ui.set_nav_collapsed(new_v);
+        }
+    });
+
+    let ui_zen = ui.as_weak();
+    ui.on_toggle_zen(move || {
+        let new_v = !ui_zen.upgrade().map(|u| u.get_zen_mode()).unwrap_or(false);
+        let mut c = AppConfig::load();
+        c.zen_mode = new_v;
+        let _ = c.save();
+        if let Some(ui) = ui_zen.upgrade() {
+            ui.set_zen_mode(new_v);
+        }
+    });
+
+    // ---- 设置页/高级面板 中持久化开关 ----
+    let ui_nc2 = ui.as_weak();
+    ui.on_set_nav_collapsed(move |v| {
+        let mut c = AppConfig::load();
+        c.nav_collapsed = v;
+        let _ = c.save();
+        if let Some(ui) = ui_nc2.upgrade() { ui.set_nav_collapsed(v); }
+    });
+    let ui_zn2 = ui.as_weak();
+    ui.on_set_zen(move |v| {
+        let mut c = AppConfig::load();
+        c.zen_mode = v;
+        let _ = c.save();
+        if let Some(ui) = ui_zn2.upgrade() { ui.set_zen_mode(v); }
+    });
+
+    ui.run()?;
+    Ok(())
+}
+
+/// 按正文模式决定最终发送内容与是否为 HTML。
+///
+/// - `0` = Markdown → 自动转为带内联样式的邮件友好 HTML（收件方看到排版，脚本按 HTML 发）
+/// - `1` = HTML     → 原样发送
+/// - 其他 = 纯文本  → 以 `text` 字段发送
+///
+/// 抽成独立函数而非内联在回调里，以便对这条发信链路做单元测试。
+fn resolve_body(body: &str, mode: i32) -> (String, bool) {
+    match mode {
+        0 => (crate::markdown::to_html(body), true),
+        1 => (body.to_string(), true),
+        _ => (body.to_string(), false),
+    }
+}
+
+/// 最小限度转义 HTML 特殊字符，供纯文本安全地嵌入预览页
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// 用系统默认浏览器打开文件（跨平台）
+fn open_in_browser(path: &std::path::Path) -> std::io::Result<()> {
+    let p = path.to_string_lossy().to_string();
+    #[cfg(target_os = "windows")]
+    {
+        // `start` 需要一个空标题参数，否则含空格的路径会被误当作窗口标题
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &p])
+            .spawn()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(&p).spawn()?;
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(&p).spawn()?;
+    }
+    Ok(())
+}
+
+/// 刷新历史记录到 UI 列表（显示全部永久保存的记录，最多 1000 条）
+fn refresh_history(ui: &App, ctx: &Arc<RhaiContext>) {
+    refresh_history_ui(ui, ctx);
+}
+
+fn refresh_history_ui(ui: &App, ctx: &Arc<RhaiContext>) {
+    let hist = ctx.history.get_recent(1000);
+    let items: Vec<slint::SharedString> = hist.iter().map(|h| {
+        let status_icon = if h.status == "ok" { "✓" } else { "✗" };
+        ss(format!("[{}] {} | {} | 主题:{} | {}", h.ts, status_icon, h.to, h.subject, h.detail))
+    }).collect();
+    let model = Rc::new(VecModel::from(items));
+    ui.set_history_items(ModelRc::from(model));
+    // 历史总数反映到 UI 属性
+    ui.set_history_count(ctx.history.len() as i32);
+}
+
+/// 运行一个已注册的自动化 handler（供 GUI / CLI 调用）
+/// 返回 (成功?, 返回值文本)
+fn run_automation(
+    engine: &rhai::Engine,
+    ast: &rhai::AST,
+    ctx: &Arc<RhaiContext>,
+    name: &str,
+    args: rhai::Array,
+) -> (bool, String) {
+    let fnptr = {
+        let map = ctx.automations.lock().unwrap();
+        match map.get(name) {
+            Some(a) => a.handler.clone(),
+            None => return (false, format!("未找到自动化 handler: {name}")),
+        }
+    };
+    match fnptr.call::<rhai::Dynamic>(engine, ast, (args,)) {
+        Ok(v) => (true, format!("{v}")),
+        Err(e) => (false, format!("调用失败: {e}")),
+    }
+}
+
+/// 把日志填充到 UI，并更新"已加密落盘"的状态与条数
+fn refresh_logs_ui_inner(ui: &App, ctx: &Arc<RhaiContext>) {
+    let mut logs = ctx.logs.lock().unwrap().clone();
+    // 合并磁盘上已加密的历史日志（去重：以内存缓冲为准）
+    if let Ok(on_disk) = ctx.log_store.read_all() {
+        for l in on_disk {
+            if !logs.contains(&l) {
+                logs.push(l);
+            }
+        }
+    }
+    let enc = ctx.log_store.has_content();
+    let count = logs.len();
+    let items: Vec<slint::SharedString> = logs.into_iter().map(slint::SharedString::from).collect();
+    ui.set_log_lines(ModelRc::from(Rc::new(VecModel::from(items))));
+    ui.set_logs_encrypted(enc);
+    ui.set_log_count(count as i32);
+}
+
+fn refresh_logs_ui(ui_weak: &slint::Weak<App>, ctx: &Arc<RhaiContext>) {
+    if let Some(ui) = ui_weak.upgrade() {
+        refresh_logs_ui_inner(&ui, ctx);
+    }
+}
+
+/// 按 handler 的字段声明顺序，收集界面上填写好的值，作为 args 数组
+fn collect_field_args(ctx: &Arc<RhaiContext>, name: &str) -> rhai::Array {
+    let fields = {
+        let map = ctx.automations.lock().unwrap();
+        match map.get(name) {
+            Some(a) => a.fields.clone(),
+            None => Vec::new(),
+        }
+    };
+    let values = ctx.field_values.lock().unwrap();
+    fields
+        .iter()
+        .map(|f| {
+            let raw = values
+                .get(&(name.to_string(), f.key.clone()))
+                .cloned()
+                .unwrap_or_default();
+            // bool 字段以 "true"/"false" 传入，转成布尔更便于脚本使用
+            if f.kind == "bool" {
+                rhai::Dynamic::from(raw == "true")
+            } else {
+                rhai::Dynamic::from(raw)
+            }
+        })
+        .collect()
+}
+
+/// 把已注册的 handler 转成 Slint 结构模型（含脚本声明的输入组件与已填值）
+fn automation_items(ctx: &Arc<RhaiContext>) -> Vec<AutomationItem> {
+    let map = ctx.automations.lock().unwrap();
+    let values = ctx.field_values.lock().unwrap();
+    map.iter()
+        .map(|(k, v)| AutomationItem {
+            name: k.clone().into(),
+            desc: v.description.clone().into(),
+            fields: ModelRc::from(Rc::new(VecModel::from(
+                v.fields
+                    .iter()
+                    .map(|f| AutomationField {
+                        key: f.key.clone().into(),
+                        label: f.label.clone().into(),
+                        kind: f.kind.clone().into(),
+                        value: values
+                            .get(&(k.clone(), f.key.clone()))
+                            .cloned()
+                            .unwrap_or_default()
+                            .into(),
+                    })
+                    .collect::<Vec<_>>(),
+            ))),
+        })
+        .collect()
+}
+
+/// 将脚本定义的 i18n / 主题 / 暗色 / 透明度 应用到 Slint 属性
+fn apply_ui_state(ui: &App, ctx: &Arc<RhaiContext>) {
+    let i18n = ctx.i18n.lock().unwrap();
+    let set = |ui: &App, k: &str, f: fn(&App, slint::SharedString)| {
+        if let Some(v) = i18n.get(k) {
+            f(ui, ss(v.clone()));
+        }
+    };
+    set(ui, "t_send", |ui, v| ui.set_t_send(v));
+    set(ui, "t_settings", |ui, v| ui.set_t_settings(v));
+    set(ui, "t_history", |ui, v| ui.set_t_history(v));
+    set(ui, "t_script", |ui, v| ui.set_t_script(v));
+    set(ui, "t_about", |ui, v| ui.set_t_about(v));
+    set(ui, "t_to", |ui, v| ui.set_t_to(v));
+    set(ui, "t_subject", |ui, v| ui.set_t_subject(v));
+    set(ui, "t_body", |ui, v| ui.set_t_body(v));
+    set(ui, "t_from", |ui, v| ui.set_t_from(v));
+    set(ui, "t_send_btn", |ui, v| ui.set_t_send_btn(v));
+    set(ui, "t_api_key", |ui, v| ui.set_t_api_key(v));
+    set(ui, "t_quota", |ui, v| ui.set_t_quota(v));
+    set(ui, "t_remaining", |ui, v| ui.set_t_remaining(v));
+    set(ui, "t_save", |ui, v| ui.set_t_save(v));
+    set(ui, "t_unlock", |ui, v| ui.set_t_unlock(v));
+    drop(i18n);
+
+    let th = ui.global::<Theme>();
+    let theme = ctx.theme.lock().unwrap();
+    let col = |th: &Theme, k: &str, f: fn(&Theme, slint::Color)| {
+        if let Some(v) = theme.get(k) {
+            if let Ok(c) = parse_color(v) {
+                f(th, c);
+            }
+        }
+    };
+    col(&th, "theme_bg", |th, c| th.set_bg(c));
+    col(&th, "theme_surface", |th, c| th.set_surface(c));
+    col(&th, "theme_fg", |th, c| th.set_fg(c));
+    col(&th, "theme_muted", |th, c| th.set_muted(c));
+    col(&th, "theme_accent", |th, c| th.set_accent(c));
+    col(&th, "theme_accent_soft", |th, c| th.set_accent_soft(c));
+    col(&th, "theme_on_accent", |th, c| th.set_on_accent(c));
+    col(&th, "theme_border", |th, c| th.set_border(c));
+    col(&th, "theme_field_bg", |th, c| th.set_field_bg(c));
+    col(&th, "theme_field_fg", |th, c| th.set_field_fg(c));
+    col(&th, "theme_field_border", |th, c| th.set_field_border(c));
+    col(&th, "theme_sorg_left", |th, c| th.set_sorg_left(c));
+    col(&th, "theme_sorg_right", |th, c| th.set_sorg_right(c));
+    drop(theme);
+
+    th.set_opacity(*ctx.opacity.lock().unwrap());
+    ui.set_dark_mode(*ctx.dark_mode.lock().unwrap());
+}
+
+/// 解析 "#rrggbb" 为 Slint Color
+fn parse_color(s: &str) -> Result<slint::Color, std::num::ParseIntError> {
+    let h = s.trim_start_matches('#');
+    let r = u8::from_str_radix(&h[0..2], 16)?;
+    let g = u8::from_str_radix(&h[2..4], 16)?;
+    let b = u8::from_str_radix(&h[4..6], 16)?;
+    Ok(slint::Color::from_rgb_u8(r, g, b))
+}
+
+/// 命令行调用功能（无 GUI）
+/// 用法：resender send --to a@b.c --subject S --body B [--html] [--from F] [--api-key K] [--password P]
+fn run_cli(args: &[String]) -> Result<()> {
+    if args.first().map(|s| s.as_str()) == Some("send") {
+        let mut to = String::new();
+        let mut subject = String::new();
+        let mut body = String::new();
+        let mut from = String::new();
+        let mut api_key = String::new();
+        let mut password = String::new();
+        let mut html = false;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--to" => { to = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                "--subject" => { subject = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                "--body" => { body = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                "--from" => { from = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                "--api-key" => { api_key = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                "--password" => { password = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                "--html" => { html = true; i += 1; }
+                _ => { i += 1; }
+            }
+        }
+        if to.is_empty() || subject.is_empty() || body.is_empty() {
+            eprintln!("用法: resender send --to <收件人> --subject <主题> --body <正文> [--html] [--from <发信名>] [--api-key <key>] [--password <解密密码>]");
+            std::process::exit(2);
+        }
+
+        let (engine, ast, ctx, _sp) = setup()?;
+        // 若命令行未给 api_key，则从 config 取
+        let api_key = if api_key.is_empty() {
+            let c = AppConfig::load();
+            if c.api_key_enc {
+                if password.is_empty() {
+                    eprintln!("API Key 已加密，请用 --password 提供密码");
+                    std::process::exit(3);
+                }
+                match crypto::decrypt_with_password(&c.api_key, &password) {
+                    Ok(s) => s,
+                    Err(e) => { eprintln!("解密失败: {e}"); std::process::exit(3); }
+                }
+            } else {
+                c.api_key
+            }
+        } else {
+            api_key
+        };
+        let from = if from.is_empty() {
+            let c = AppConfig::load();
+            if c.from_name_enc && !password.is_empty() {
+                crypto::decrypt_with_password(&c.from_name, &password).unwrap_or_default()
+            } else {
+                c.from_name
+            }
+        } else {
+            from
+        };
+
+        // 把 api_key / from 注入 store，让脚本 get_identity 能读到（脚本默认读 store）
+        {
+            let mut c = AppConfig::load();
+            c.api_key = api_key.clone();
+            c.api_key_enc = false;
+            if !from.is_empty() { c.from_name = from.clone(); c.from_name_enc = false; }
+            let _ = c.save();
+        }
+        *ctx.crypto_password.lock().unwrap() = password.clone();
+
+        // 若启用了脚本信任，则尝试用提供的密码解锁（CLI 下跳过签名校验）
+        let cfg_cli = AppConfig::load();
+        if cfg_cli.script_trust_enabled {
+            let r = rhai_ext::trust_primitives::unlock(
+                &password,
+                &std::fs::read_to_string(&_sp).unwrap_or_default(),
+                "",
+            );
+            if !r.to_string().is_empty() {
+                eprintln!("脚本信任解锁失败: {r}");
+                std::process::exit(3);
+            }
+        }
+
+        let mut scope = make_scope();
+        scope.push("crypto_password", password.clone());
+        let result: Result<(), Box<dyn std::error::Error>> = (|| {
+            engine.call_fn(&mut scope, &ast, "send_mail",
+                (to.clone(), subject.clone(), body.clone(), html, password, rhai::Array::new()))?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            eprintln!("发送失败（脚本错误）: {e}");
+            std::process::exit(4);
+        }
+        let (status, is_err) = ctx.status.lock().unwrap().clone();
+        if is_err {
+            eprintln!("✗ {status}");
+            std::process::exit(1);
+        } else {
+            println!("✓ {status}");
+        }
+        Ok(())
+    } else if args.first().map(|s| s.as_str()) == Some("run") {
+        // 运行一个已注册的自动化 handler：resender run <name> [arg1] [arg2] ...
+        let name = args.get(1).cloned().unwrap_or_default();
+        if name.is_empty() {
+            eprintln!("用法: resender run <handler名称> [参数...]");
+            std::process::exit(2);
+        }
+        let argv: Vec<String> = args.get(2..).unwrap_or(&[]).to_vec();
+        let (engine, ast, ctx, _sp) = setup()?;
+        let args_dyn: rhai::Array = argv.into_iter().map(|s| rhai::Dynamic::from(s)).collect();
+        let (ok, msg) = run_automation(&*engine, &ast, &ctx, &name, args_dyn);
+        if ok {
+            println!("✓ {name}: {msg}");
+            Ok(())
+        } else {
+            eprintln!("✗ {msg}");
+            std::process::exit(1);
+        }
+    } else if matches!(args.first().map(|s| s.as_str()), Some("version") | Some("--version") | Some("-V")) {
+        // 打印版本（与 GUI 关于页同源，均来自 Cargo.toml）
+        println!("SWE::Resender {APP_VERSION}");
+        Ok(())
+    } else {
+        println!("Resender 命令行用法:");
+        println!("  resender send --to <收件人> --subject <主题> --body <正文> [--html] [--from <发信名>] [--api-key <key>] [--password <解密密码>]");
+        println!("  resender run <handler名称> [参数...]   运行脚本注册的自动化 handler");
+        println!("  resender version | --version | -V      打印版本");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_mode_markdown_converts_to_html() {
+        let (body, is_html) = resolve_body("# t\n\n**b**", 0);
+        assert!(is_html, "Markdown 模式应按 HTML 发送");
+        assert!(body.contains("<h1"), "应转换为 HTML，got: {body}");
+        assert!(!body.contains("# t"), "原文 Markdown 标记应已被解析掉");
+    }
+
+    #[test]
+    fn body_mode_html_passes_through() {
+        let src = "<b>bold</b>";
+        let (body, is_html) = resolve_body(src, 1);
+        assert!(is_html, "HTML 模式应按 HTML 发送");
+        assert_eq!(body, src, "HTML 模式应原样发送，不做转换");
+    }
+
+    #[test]
+    fn body_mode_text_is_plain() {
+        let src = "plain text";
+        let (body, is_html) = resolve_body(src, 2);
+        assert!(!is_html, "纯文本模式应按 text 字段发送");
+        assert_eq!(body, src, "纯文本模式应原样发送");
+    }
+
+    #[test]
+    fn html_escape_neutralizes_tags() {
+        assert_eq!(html_escape("<script>&"), "&lt;script&gt;&amp;");
+    }
+}

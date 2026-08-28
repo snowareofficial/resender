@@ -1,0 +1,68 @@
+// Copyright (C) 2026~now S.A.
+// SPDX-License-Identifier: MulanPubL-2.0
+
+// ===========================================================================
+//  主题单例：Rust 侧填充，所有组件统一引用
+//  浅色为默认；脚本可通过 ui::set_theme("theme_bg", ...) 等动态覆盖
+//
+//  配色沿用 SOrg / SNOWARE 品牌色：青（#06b6d4）→ 蓝（#3b82f6），
+//  强调色统一走 `brand_from` → `brand_to` 渐变。
+//  重要：按钮文字固定为深色（on_accent），避免在浅色渐变上出现白字。
+// ===========================================================================
+export global Theme {
+    // ---- 背景与表面 ----
+    in-out property <color> bg: #f4f6fa;
+    in-out property <color> surface: #ffffff;
+    in-out property <color> surface_alt: #fafbfd;
+    in-out property <color> border: #e4e8f0;
+    in-out property <color> border_strong: #d3d9e6;
+
+    // ---- 文字 ----
+    in-out property <color> fg: #1e2532;
+    in-out property <color> fg_secondary: #58637a;
+    in-out property <color> muted: #98a2b6;
+
+    // ---- 强调色 ----
+    in-out property <color> accent: #3b82f6;
+    in-out property <color> accent_deep: #1d4ed8;
+    in-out property <color> accent_soft: #e8f1fe;
+    in-out property <color> accent_tint: #dbeafe;
+    // 按钮/选中态上的文字：始终深色（禁止白字，保证在浅色渐变上可读）
+    in-out property <color> on_accent: #0f172a;
+
+    // ---- 品牌渐变（青 → 蓝）----
+    in-out property <color> brand_from: #22d3ee;
+    in-out property <color> brand_to: #3b82f6;
+    // 顶栏等大面积区域用的低饱和版本，避免过于抢眼
+    in-out property <color> brand_soft_from: #a5f3fc;
+    in-out property <color> brand_soft_to: #bfdbfe;
+
+    // ---- 状态色 ----
+    in-out property <color> success: #16a34a;
+    in-out property <color> success_soft: #e8f7ee;
+    in-out property <color> danger: #dc2626;
+    in-out property <color> danger_soft: #fdecec;
+
+    // ---- 阴影 ----
+    in-out property <color> shadow: #1e293b1f;
+    in-out property <color> shadow_strong: #1e293b33;
+    in-out property <color> scrim: #0f172a99;
+
+    // ---- SOrg 品牌 ----
+    in-out property <color> sorg_left: #06b6d4;
+    in-out property <color> sorg_right: #3b82f6;
+    in-out property <float> opacity: 1.0;
+
+    // ---- 输入框 ----
+    in-out property <color> field_bg: #f2f5fa;
+    in-out property <color> field_fg: #1e2532;
+    in-out property <color> field_border: #dbe2ee;
+    in-out property <color> field_border_focus: #3b82f6;
+
+    // ---- 字体 ----
+    // 主字体：小米 MiSans VF（可变字体，嵌入于 ui/MiSans VF.ttf）
+    in-out property <string> font_family: "MiSans VF";
+    // 等宽字体：用于日志 / 版本号 / 签名等技术性文本
+    // 注：MiSans 无等宽变体，此处保留系统等宽族，避免技术文本字符对不齐
+    in-out property <string> font_mono: "monospace";
+}

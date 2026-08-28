@@ -1,0 +1,82 @@
+// Copyright (C) 2026~now S.A.
+// SPDX-License-Identifier: MulanPubL-2.0
+
+// ===========================================================================
+//  脚本页：Rhai 脚本信息 / 组织标识 / 运行日志
+// ===========================================================================
+import { ListView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Card, PrimaryButton } from "../widgets.slint";
+
+export component ScriptTab inherits Rectangle {
+    in-out property <string> script-path: "";
+    in-out property <string> sorg-banner: "";
+    in-out property <[string]> log-lines: [];
+    // 日志落盘加密状态（需已设置加密密码才会写入密文文件）
+    in-out property <bool> logs-encrypted: false;
+    in-out property <int> log-count: 0;
+
+    callback reload-script();
+    callback refresh-logs();
+    callback clear-logs();
+
+    VerticalLayout {
+        spacing: 14px;
+        vertical-stretch: 1;
+
+        Card { title: "Rhai 脚本（动态业务）";
+            VerticalLayout {
+                spacing: 8px;
+                Text { text: "当前脚本：" + root.script-path; font-size: 12px; color: Theme.muted; }
+                PrimaryButton { text: "重新加载脚本"; clicked => { root.reload-script(); } }
+                Text { text: "所有能力（身份获取/禁止判定/发信/统计）均由脚本驱动，Rust 仅注册安全原语。"; font-size: 12px; color: Theme.muted; wrap: word_wrap; }
+            }
+        }
+
+        Card { title: "SOrg / SNOWARE";
+            Text {
+                text: root.sorg-banner;
+                font-size: 12px;
+                color: Theme.accent;
+                wrap: word_wrap;
+                font-family: Theme.font_mono;
+            }
+        }
+
+        Card { title: "运行日志（ui::log 输出）";
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 6px;
+                vertical-stretch: 1;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "脚本中 ui::log(...) 的输出（最多保留 500 条）"; font-size: 12px; color: Theme.muted; }
+                    Rectangle { horizontal-stretch: 1; }
+                    PrimaryButton { text: "刷新日志"; subtle: true; clicked => { root.refresh-logs(); } }
+                    PrimaryButton { text: "清空日志"; subtle: true; clicked => { root.clear-logs(); } }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "共 " + root.log-count + " 条 · 已加密落盘（SM4-GCM，密文存于 logs.enc）";
+                        font-size: 11px;
+                        color: Theme.success;
+                        font-family: Theme.font_mono;
+                    }
+                }
+                if root.log-lines.length == 0 : Text { text: "（暂无日志；发信或运行自动化后这里会显示输出）"; font-size: 12px; color: Theme.muted; }
+                ListView {
+                    min-height: 140px;
+                    vertical-stretch: 1;
+                    for line in root.log-lines : Text {
+                        text: line;
+                        font-size: 11px;
+                        color: Theme.fg;
+                        wrap: word_wrap;
+                        font-family: Theme.font_mono;
+                    }
+                }
+            }
+        }
+    }
+}
