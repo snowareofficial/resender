@@ -9,6 +9,8 @@ export component InfoTab inherits Rectangle {
     in-out property <string> sorg-banner: "";
     // 版本由外层从 Cargo.toml（CARGO_PKG_VERSION）注入；此处仅为兜底缺省值
     in-out property <string> app-version: "0.0.0";
+    // SWE Serial 编号（Rust 侧 SWE_SERIAL 注入，对应 crossduty/1955.md 档案）
+    in-out property <string> swe-serial: "<< 19 * 55 >>";
 
     VerticalLayout {
         spacing: 16px;
@@ -25,6 +27,12 @@ export component InfoTab inherits Rectangle {
                 Text { text: "SWE::Resender"; font-size: 22px; font-weight: 700; color: Theme.fg; }
                 Text { text: "Rhai 驱动的 Resend 发信工具"; font-size: 13px; color: Theme.muted; }
                 Text { text: "版本 " + root.app-version; font-size: 12px; color: Theme.muted; }
+                Text {
+                    text: "SWE Serial " + root.swe-serial;
+                    font-size: 11px;
+                    color: Theme.accent;
+                    font-family: Theme.font_mono;
+                }
             }
         }
 

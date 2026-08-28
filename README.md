@@ -1,8 +1,11 @@
 # SWE::Resender — Resend 发信工具
 
+**SWE Serial `<< 19 * 55 >>`**（档案见 crossduty/1955.md）
+
 基于 [Slint](https://slint.dev/) 的跨平台桌面应用，通过 [Resend](https://resend.com) API 发送邮件。
 
 **许可**：`MulanPubL V2`（Mulan Public License, Version 2，SPDX: `MulanPubL-2.0`），详见 [LICENSE](LICENSE)。
+> 附加限制：未经作者本人书面允许，欧盟（EU）与北约（NATO）成员国公民或组织不得对本软件进行**商业**使用，见 [LICENSE](LICENSE) 末尾条款。
 GUI 框架 Slint 采用 `LicenseRef-Slint-Royalty-free-2.0`。
 特点：**Rhai 脚本驱动全部业务能力**、**Markdown 正文自动转邮件友好 HTML**、
 **固定发信名称**、**发信计数 + 套餐余量**、**分类密码加密（libsmx 国密 SM4-GCM）**、
@@ -159,6 +162,25 @@ resender version
 # 帮助
 resender help
 ```
+
+### 无黑框与命令行共存（Windows）
+
+同一二进制，两种形态：
+
+- **GUI**：`release` 构建为 Windows GUI 子系统——**双击启动不弹控制台黑框**
+  （`debug` 构建保留控制台，便于查看日志）
+- **命令行**：在 cmd / PowerShell 里直接运行 `resender send/run/version/help`，
+  输出正常显示
+
+实现：`windows_subsystem = "windows"` 使 release 无黑框；CLI 模式下若进程
+没有有效 stdout（无控制台），通过 `AttachConsole(ATTACH_PARENT_PROCESS)`
+附加到启动它的父终端并把 stdout/stderr 重定向到 `CONOUT$`。
+
+只修复**无效**的句柄：若 stdout 已被重定向到文件/管道（`> file` / `|`），
+保持原样，绝不覆盖，否则重定向的输出会凭空丢失。
+
+跨平台：`AttachConsole` 是 Windows 专属，macOS / Linux 原生有控制台，
+该逻辑为空实现，不影响。
 
 ## Markdown 正文
 

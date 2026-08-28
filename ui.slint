@@ -139,6 +139,8 @@ export component App inherits Window {
     in-out property <string> sorg_banner: "";
     // 应用版本：由 Rust 侧用 CARGO_PKG_VERSION 填充（发版后自动同步，无需手改）
     in-out property <string> app-version: "0.0.0";
+    // SWE Serial 编号（由 Rust 侧 SWE_SERIAL 常量注入，对应 crossduty/1955.md 档案）
+    in-out property <string> swe-serial: "<< 19 * 55 >>";
     in-out property <[string]> history_items;
     in-out property <int> history_count: 0;
     in-out property <[string]> attachments;
@@ -370,6 +372,7 @@ export component App inherits Window {
                             vertical-stretch: 1;
                             sorg-banner: root.sorg_banner;
                             app-version: root.app-version;
+                            swe-serial: root.swe-serial;
                         }
 
                         if tab == 5 : AutomationTab {

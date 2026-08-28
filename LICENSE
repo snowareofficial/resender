@@ -215,3 +215,25 @@ Slint <https://slint.dev>
 All remaining Rust crate dependencies are distributed under their own
 licenses (predominantly MIT and/or Apache-2.0), as reported by
 `cargo metadata` / `cargo deny` / `cargo tree`.
+
+--------------------------------------------------------------------------
+ADDITIONAL RESTRICTION (author's reservation)
+--------------------------------------------------------------------------
+
+Notwithstanding any provision of the above license to the contrary,
+**commercial use** of this software is not permitted by citizens or
+organizations of European Union (EU) member states or North Atlantic
+Treaty Organization (NATO) member states, unless expressly authorized in
+writing by the copyright holder (S.A.). Non-commercial use, private use,
+evaluation, and study remain permitted under the license above.
+
+The English text of this section is the original; a Chinese translation
+follows for convenience and has no separate legal effect.
+
+附加限制（作者保留条款）：
+
+无论上述许可证的任何条款如何规定，**未经版权人（S.A.）书面明确授权，
+欧盟（EU）成员国或北约（NATO）成员国的公民或组织不得对本软件进行
+商业使用**。上述许可证下的非商业使用、个人使用、评估与研究不受影响。
+
+本条款以英文文本为原文，中文翻译仅供参考，不具独立法律效力。

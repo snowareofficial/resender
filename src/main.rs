@@ -11,6 +11,13 @@
 //!   <<*>> SOrg :: -^v- SNOWARE
 //!   Copyright (C) 2026~now S.A. Licensed under Mulan PubL v2.
 
+//! 无黑框（仅 Windows / release）：
+//! - debug 构建保留控制台窗口，便于查看日志
+//! - release 构建隐藏控制台，双击启动 GUI 不再弹出黑框
+//! - 命令行模式（send / run / version / help）在 release 下通过
+//!   `attach_parent_console()` 附加父控制台，输出仍可见（见下方实现）
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod config;
 mod crypto;
 mod history;
@@ -32,6 +39,10 @@ use rhai_ext::{RhaiContext, SORG_BANNER, build_engine, compile_script, make_scop
 /// 应用版本：唯一来源为 Cargo.toml 的 `version`（编译期展开）。
 /// GUI 关于页与 CLI `--version` 均读取此常量，发版后自动同步。
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// SWE Serial 编号：`<< 19 * 55 >>` = 1955，本项目的档案标识。
+/// 单一来源：GUI 关于页与 README 均引用此常量（crossduty/1955.md 档案与此对应）。
+pub const SWE_SERIAL: &str = "<< 19 * 55 >>";
 
 /// 全局 Rhai 上下文（供原语模块通过 RHAI_CTX.get() 访问）
 pub static RHAI_CTX: std::sync::OnceLock<Arc<RhaiContext>> = std::sync::OnceLock::new();
@@ -98,11 +109,87 @@ fn setup() -> Result<(Arc<rhai::Engine>, rhai::AST, Arc<RhaiContext>, PathBuf)> 
     Ok((engine, ast, ctx, script_path))
 }
 
+/// Windows：GUI 子系统（release 无黑框）下，CLI 模式若 stdout 无效
+/// （进程没有关联控制台），附加到启动它的父终端，让 `resender run ...`
+/// 在 cmd / PowerShell 里仍能看到输出。
+///
+/// 原理：
+/// - `windows_subsystem = "windows"` 的进程默认不关联控制台，stdout 句柄无效
+/// - `AttachConsole(ATTACH_PARENT_PROCESS)` 附加到父进程的控制台
+/// - Rust 的 `stdout()` 每次写入都会重新 `GetStdHandle`，因此替换句柄后
+///   `println!` / `eprintln!` 立即生效（无需 freopen）
+///
+/// 非 Windows 平台为空实现：macOS / Linux 原生就有控制台，无需处理。
+#[cfg(windows)]
+fn attach_parent_console() {
+    use std::os::windows::io::AsRawHandle;
+
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    // GetStdHandle / SetStdHandle 的标准句柄标识（-11 / -12 的 u32 形式）
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
+    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4;
+    // GetStdHandle 失败时的返回值
+    const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = usize::MAX as *mut std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+        fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        fn GetStdHandle(n_std_handle: u32) -> *mut std::ffi::c_void;
+        fn SetStdHandle(n_std_handle: u32, handle: *mut std::ffi::c_void) -> i32;
+    }
+
+    unsafe {
+        // 已有控制台（debug 构建 / 已关联）则无需处理
+        if !GetConsoleWindow().is_null() {
+            return;
+        }
+        let is_valid = |h: *mut std::ffi::c_void| !h.is_null() && h != INVALID_HANDLE_VALUE;
+
+        // 关键：只修复「无效」的句柄。
+        // 若 stdout 已被重定向到文件/管道（`> file` / `|`），GetStdHandle 返回
+        // 有效句柄，绝不能覆盖——否则重定向的输出会凭空丢失。
+        let out = GetStdHandle(STD_OUTPUT_HANDLE);
+        let err = GetStdHandle(STD_ERROR_HANDLE);
+        let fix_out = !is_valid(out);
+        let fix_err = !is_valid(err);
+        if !fix_out && !fix_err {
+            return;
+        }
+        // 附加父控制台；失败说明没有父终端（如从资源管理器启动），放弃
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+        // 把无效的 stdout / stderr 重定向到控制台输出设备
+        let redirect = |id: u32| {
+            if let Ok(f) = std::fs::OpenOptions::new()
+                .write(true)
+                .open(r"\\.\CONOUT$")
+            {
+                SetStdHandle(id, f.as_raw_handle() as *mut std::ffi::c_void);
+                // 进程生命周期内持有句柄；显式泄漏避免关闭导致后续写入失败
+                std::mem::forget(f);
+            }
+        };
+        if fix_out {
+            redirect(STD_OUTPUT_HANDLE);
+        }
+        if fix_err {
+            redirect(STD_ERROR_HANDLE);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     // 命令行调用功能（无 GUI）
     if args.len() > 1 && (args[1] == "send" || args[1] == "run" || args[1] == "help" || args[1] == "--help" || args[1] == "-h"
         || args[1] == "version" || args[1] == "--version" || args[1] == "-V") {
+        // release 下本进程无控制台：附加父终端，让 CLI 输出可见
+        attach_parent_console();
         return run_cli(&args[1..]);
     }
 
@@ -115,6 +202,8 @@ fn main() -> Result<()> {
     ui.set_color_scheme(slint::private_unstable_api::re_exports::ColorScheme::Light);
     // 版本取自 Cargo.toml（APP_VERSION），发版后自动同步，无需在 UI 里手改
     ui.set_app_version(ss(APP_VERSION));
+    // SWE Serial 编号（单一来源 SWE_SERIAL）
+    ui.set_swe_serial(ss(SWE_SERIAL));
     let cfg = AppConfig::load();
 
     // 平台检测：用于决定窗口控制按钮的位置/顺序（≥3 平台）
