@@ -22,8 +22,12 @@ use anyhow::{Context, Result};
 /// 远端版本信息
 #[derive(Debug, Clone, Default)]
 pub struct RemoteVersion {
+    /// 项目名：VersionFile 契约字段，当前仅作标识，不参与版本比较
+    #[allow(dead_code)]
     pub project: String,
     pub latest: String,
+    /// 最低支持版本：契约字段，暂未用于强制升级判定
+    #[allow(dead_code)]
     pub min: String,
     pub note: String,
     pub url: String,

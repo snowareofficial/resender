@@ -1,0 +1,106 @@
+# 单向镜像：Gitee（权威源） -> GitHub（镜像 + CI）
+#
+# 设计要点：
+# - **单向**：Gitee 是唯一权威源，GitHub 不回写。本仓库的一切改动都应提交到 Gitee。
+# - **防误覆盖**：默认不覆盖 GitHub 上「Gitee 没有的独有提交」。
+#   若检测到（通常是有人在 GitHub 上直接改了代码），工作流会失败并提示，
+#   需手动勾选 force 才会丢弃那些提交。避免静默丢失代码。
+# - **凭据**：Gitee 公开仓库免密即可拉取；私有仓库需配置 secrets
+#   GITEE_USER / GITEE_TOKEN（Gitee 私人令牌，仅需只读权限）。
+#
+# 需要的 secrets（私有仓库时）：
+#   GITEE_USER   Gitee 用户名
+#   GITEE_TOKEN  Gitee 私人令牌（read）
+# GITHUB_TOKEN 由 Actions 自动提供，无需配置。
+name: 同步 Gitee → GitHub
+
+on:
+  schedule:
+    # 每 6 小时同步一次（GitHub 在负载高时可能延迟，属正常现象）
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 强制覆盖，丢弃 GitHub 上的独有提交
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  # 同一时间只允许一个同步任务，避免并发推送互相覆盖
+  group: gitee-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取 Gitee 镜像
+        env:
+          GITEE_USER: ${{ secrets.GITEE_USER }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          REPO_PATH="snoware/resender"
+          if [ -n "${GITEE_USER:-}" ] && [ -n "${GITEE_TOKEN:-}" ]; then
+            SRC="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${REPO_PATH}.git"
+            echo "使用凭据拉取 Gitee 私有仓库"
+          else
+            SRC="https://gitee.com/${REPO_PATH}.git"
+            echo "未配置 GITEE_USER/GITEE_TOKEN，按公开仓库拉取"
+          fi
+
+          git clone --mirror "$SRC" mirror.git
+          cd mirror.git
+
+          # 默认分支：跟随 Gitee（本项目为 master）
+          DEFAULT_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || echo master)"
+          echo "默认分支: ${DEFAULT_BRANCH}"
+          echo "DEFAULT_BRANCH=${DEFAULT_BRANCH}" >> "$GITHUB_ENV"
+
+      - name: 检查 GitHub 端是否有会被覆盖的独有提交
+        id: guard
+        working-directory: mirror.git
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote add github \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # 首次同步时 GitHub 端还没有内容，直接放行
+          if ! git fetch --quiet github "${DEFAULT_BRANCH}" 2>/dev/null; then
+            echo "GitHub 端尚无 ${DEFAULT_BRANCH} 分支，按首次同步处理"
+            echo "github_only=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          GITHUB_ONLY="$(git rev-list --count "github/${DEFAULT_BRANCH}" --not "refs/heads/${DEFAULT_BRANCH}" || echo 0)"
+          echo "github_only=${GITHUB_ONLY}" >> "$GITHUB_OUTPUT"
+          echo "GitHub 独有提交数: ${GITHUB_ONLY}"
+          if [ "${GITHUB_ONLY}" != "0" ]; then
+            git --no-pager log --oneline -n 5 "refs/heads/${DEFAULT_BRANCH}..github/${DEFAULT_BRANCH}" || true
+          fi
+
+      - name: 阻止覆盖提示
+        if: steps.guard.outputs.github_only != '0' && inputs.force != true
+        run: |
+          echo "::error::GitHub 上存在 ${{ steps.guard.outputs.github_only }} 个 Gitee 没有的提交，已中止同步。"
+          echo "::error::GitHub 是单向镜像，改动应提交到 Gitee。"
+          echo "::error::确认要丢弃这些提交时，请手动运行本工作流并勾选 force。"
+          exit 1
+
+      - name: 推送镜像到 GitHub
+        if: steps.guard.outputs.github_only == '0' || inputs.force == true
+        working-directory: mirror.git
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote set-url --push github \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --mirror github
+          echo "同步完成"

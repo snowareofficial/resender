@@ -5490,7 +5490,7 @@ version = "0.1.2"
 
 [[package]]
 name = "swsml"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "swsml-derive",
@@ -5498,7 +5498,7 @@ dependencies = [
 
 [[package]]
 name = "swsml-derive"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",

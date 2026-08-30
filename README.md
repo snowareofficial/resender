@@ -101,6 +101,11 @@ tools/
   check_ico.py          # 校验生成的图标
   disk_report.py        # 磁盘占用 / 打包体积报告
   rehash_builtin.py     # 重新计算内置资源（脚本）的哈希
+  check_builds.py       # 校验 gui / 纯 CLI 两种 feature 形态都能构建
+  setup_github_mirror.py # 用 gh 建立 Gitee→GitHub 镜像仓库并首次同步
+.github/workflows/
+  sync-from-gitee.yml   # 单向镜像：Gitee -> GitHub（每 6 小时，带防覆盖保护）
+  build.yml             # 三平台 × 两种形态构建校验
 LICENCE-MulanPublV2     # 木兰许可证 v2 权威正文副本（LICENSE 的生成来源）
 LICENSE                 # 版权声明 + 许可证全文 + 第三方组件许可
 ```
@@ -137,6 +142,56 @@ cargo build --release
 ```
 
 > 桌面端依赖系统 WebView（Windows 自带 WebView2）。首次 `cargo build` 会下载并编译 Slint / libsmx 等 crate，耗时较长。
+
+### crate 分区：GUI 与 CLI 两种形态
+
+同一份代码可编出两种形态，由 Cargo feature 分区：
+
+| 构建方式 | 形态 | 说明 |
+|---|---|---|
+| `cargo build --release`（默认） | `gui` | 完整桌面应用：Slint GUI + CLI 双形态 |
+| `cargo build --release --no-default-features` | 纯 CLI | **不含 Slint 运行时**，仅 `send` / `run` / `version` / `help` / `check-update` |
+
+纯 CLI 形态不引入 `slint` / `rfd`，无窗口系统依赖，编译时间与产物体积显著下降，
+适合服务器、CI 与 cron 定时任务场景。
+
+```bash
+# 纯 CLI 构建；不带参数启动会提示未启用 GUI，而非尝试打开窗口
+cargo build --release --no-default-features
+cargo check --no-default-features
+
+# 一次校验两种形态都能构建（只报本 crate 自身的诊断）
+python tools/check_builds.py
+```
+
+设计要点：`slint-build` 保持为普通 build-dependency——**Cargo 不会把 package
+feature 以 `--cfg` 形式传给 build script**（只设置 `CARGO_FEATURE_GUI` 环境变量），
+若把 `slint-build` 设为 optional 并用 `#[cfg(feature = "gui")]` 门控调用它的函数，
+会出现「feature 开启时函数却被裁掉」的 E0425。故 `build.rs` 读环境变量决定是否
+真正编译 `.slint`。
+
+## 仓库与 CI
+
+- **Gitee（`gitee.com/snoware/resender`）是唯一权威源**，一切改动提交到这里。
+- **GitHub 是单向镜像**（`.github/workflows/sync-from-gitee.yml`）：每 6 小时从
+  Gitee 全量镜像一次。若检测到 GitHub 上存在 Gitee 没有的提交（有人在 GitHub 上
+  直接改了代码），同步会**失败并告警**而非静默覆盖，需手动勾选 `force` 才丢弃。
+- **构建**：`.github/workflows/build.yml` 覆盖 Linux / Windows / macOS ×
+  `gui` / `cli` 两种形态。因 Actions 对 macOS 按 10 倍分钟计费，PR 只跑 Linux，
+  macOS 仅在 push 主分支或手动触发时参与。
+- **字体**：`ui/MiSans VF.ttf`（19 MiB）随仓库分发，`build.rs` 检测到即内嵌；
+  缺失时回退系统字体，构建同样成功。
+
+首次建立镜像仓库（需先安装并登录 GitHub CLI：
+`winget install --id GitHub.cli -e` → `gh auth login --web`）：
+
+```bash
+python tools/setup_github_mirror.py --check     # 检查环境是否就绪
+python tools/setup_github_mirror.py --private   # 建私有仓库并首次全量镜像
+```
+
+> **注意**：本地改动必须先推送到 Gitee，否则下一次定时同步会用 Gitee 的旧内容
+> 覆盖 GitHub（单向镜像，GitHub 侧不回写）。
 
 ## 使用步骤
 
@@ -321,6 +376,8 @@ api_key: re_xxx
 - `rfd` 0.15（原生文件选择对话框，用于添加附件）
 - `comrak` 0.54（Markdown 解析，GFM 完整支持；已关闭默认 feature 以跳过 CLI 与语法高亮依赖）
 - `css-inline` 0.21（把 CSS 内联进 `style` 属性，邮件客户端兼容必需）
+- `swsml` 0.4（SML 数据格式，lib 名为 `sml`；配置 / 草稿 / 历史 / VersionFile 统一用它）
+- `swi18n` 0.1（系统语言自动识别 + 消息目录，见 `src/i18n.rs`）
 
 ## 许可
 

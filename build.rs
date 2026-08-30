@@ -2,27 +2,20 @@
 // SPDX-License-Identifier: MulanPubL-2.0
 
 fn main() {
-    // 生成 `ui/fonts.slint`：字体 import 的间接层。
+    // ── feature 分区：GUI 可选 ────────────────────────────────────────────
+    // 见 Cargo.toml 的 [features]：`gui` 默认开启；
+    // `--no-default-features` 编纯 CLI 时不编译 Slint 界面。
     //
-    // 背景：界面字体 `ui/MiSans VF.ttf` 有 19 MiB，而 crates.io 的上传上限是
-    // **10 MB**，故它不能随 crate 分发（否则上传被拒）。Slint 的 `import`
-    // 无法条件化，因此把字体 import 抽到本文件，按字体是否实际存在来生成：
-    //   - 存在（从仓库源码构建）  -> 写入 import，使用 MiSans
-    //   - 不存在（从 crates.io 安装）-> 写入空文件，运行时回退系统字体
-    // 这样两种来源都能构建成功，仅字体表现不同。
-    let out_dir = std::path::PathBuf::from(
-        std::env::var("OUT_DIR").expect("OUT_DIR 未设置"),
-    );
-    generate_font_import(&out_dir);
-
-    // 用 include_paths 编译：ui.slint 的 `import { FontsLoaded } from "fonts.slint"`
-    // 会在 OUT_DIR 中找到该文件；fonts.slint 内 `import "MiSans VF.ttf"` 在 ui/ 中解析。
-    let ui_dir = std::path::Path::new("ui")
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from("ui"));
-    let cfg = slint_build::CompilerConfiguration::new()
-        .with_include_paths(vec![out_dir, ui_dir]);
-    slint_build::compile_with_config("ui.slint", cfg).expect("编译 ui.slint 失败");
+    // **必须用环境变量而非 cfg!**：Cargo 不会把 package 的 feature 以 `--cfg`
+    // 形式传给 build script（只设置 CARGO_FEATURE_GUI 环境变量），因此
+    // build.rs 里的 `#[cfg(feature = "gui")]` 恒为 false —— 若用它门控函数，
+    // 会出现「函数被裁掉却仍被调用」的 E0425。故这里读环境变量。
+    let gui = std::env::var("CARGO_FEATURE_GUI").is_ok();
+    if gui {
+        compile_ui();
+    } else {
+        println!("cargo:warning=未启用 gui feature：跳过 Slint 界面编译（纯 CLI 构建）");
+    }
 
     // —— 编译期内置脚本完整性校验 ——
     // 计算 scripts/default.rhai 的 SM3，与 scripts/default.rhai.sm3 中
@@ -68,7 +61,34 @@ fn main() {
     }
 }
 
+/// 编译 Slint 界面（仅 `gui` feature 启用时由 `main()` 调用）。
+///
+/// 本函数**不能**加 #[cfg(feature = "gui")]：Cargo 不向 build script 传
+/// feature cfg，加了会导致函数恒被裁掉（E0425）。是否调用由 env var 决定。
+fn compile_ui() {
+    // 用 include_paths 编译：ui.slint 的 `import { FontsLoaded } from "fonts.slint"`
+    // 会在 OUT_DIR 中找到该文件；fonts.slint 内 `import "MiSans VF.ttf"` 在 ui/ 中解析。
+    let out_dir = std::path::PathBuf::from(
+        std::env::var("OUT_DIR").expect("OUT_DIR 未设置"),
+    );
+    generate_font_import(&out_dir);
+
+    let ui_dir = std::path::Path::new("ui")
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from("ui"));
+    let cfg = slint_build::CompilerConfiguration::new()
+        .with_include_paths(vec![out_dir, ui_dir]);
+    slint_build::compile_with_config("ui.slint", cfg).expect("编译 ui.slint 失败");
+}
+
 /// 生成字体 import 的间接层文件（写入 OUT_DIR，供 Slint 的 include_paths 解析）。
+///
+/// 背景：界面字体 `ui/MiSans VF.ttf` 有 19 MiB，而 crates.io 的上传上限是
+/// **10 MB**，故它不能随 crate 分发（否则上传被拒）。Slint 的 `import`
+/// 无法条件化，因此把字体 import 抽到本文件，按字体是否实际存在来生成：
+///   - 存在（从仓库源码构建）    -> 写入 import，使用 MiSans
+///   - 不存在（从 crates.io 安装）-> 写入空文件，运行时回退系统字体
+/// 这样两种来源都能构建成功，仅字体表现不同。
 ///
 /// 见 `main()` 中的说明：字体 19 MiB 无法随 crate 分发（crates.io 上限 10 MB），
 /// 故让该文件在字体缺失时为空，构建仍可成功，运行时回退系统字体。

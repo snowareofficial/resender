@@ -36,8 +36,25 @@ exclude = [
     "wrangler.err",
 ]
 
+[features]
+# ── crate 分区 ────────────────────────────────────────────────────────────
+# Resender 同一份代码可编出两种形态，由 feature 分区控制：
+#
+#   default（含 gui）    -> 完整桌面应用（Slint GUI + CLI 双形态，见 README）
+#   --no-default-features -> 纯 CLI 二进制：不引入 Slint / rfd / slint-build，
+#                            无 WebView 依赖，编译时间与产物体积大幅下降，
+#                            适合服务器 / CI / cron 场景（`resender send|run`）。
+#
+# CLI 路径（send / run / version / help / check-update）两种构建都可用；
+# 仅在纯 CLI 构建下，不带参数启动会提示未启用 GUI 而非打开窗口。
+gui = ["dep:slint", "dep:rfd"]
+default = ["gui"]
+
 [dependencies]
-slint = "1.8"
+# GUI 相关（gui feature 开启时才引入，纯 CLI 构建完全不编译）
+slint = { version = "1.8", optional = true }
+# 原生文件选择对话框（添加附件）；仅 GUI 使用
+rfd = { version = "0.15", optional = true }
 libsmx = "0.3"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "stream"], default-features = false }
 # 流式上传体（用于统计大附件上传进度，实现 MB/MB 计量）
@@ -51,19 +68,36 @@ rand = "0.8"
 base64 = "0.22"
 rhai = { version = "1.18", features = ["sync", "serde"] }
 once_cell = "1"
-rfd = "0.15"
 # Markdown → 邮件友好 HTML
 # comrak 关掉默认 feature（默认含 cli + syntect 语法高亮，会显著拖慢编译且本项目不需要）
 comrak = { version = "0.54", default-features = false }
 css-inline = { version = "0.21", default-features = false }
-# 两个自研 crate 均已发布到 crates.io（0.1.0）。
+# 两个自研 crate 均已发布到 crates.io。
 # 同时写 version 与 path：本地开发用 path（改动即时生效），
 # 发布/他人安装时用 version（crates.io 要求发布包的所有依赖必须有版本号）。
 swi18n = { version = "0.1", path = "../swi18n" }
 # SML：VersionFile、配置、草稿、历史统一用 SML（lib 名为 sml）
-swsml = { version = "0.3", path = "../sml/rust", features = ["serde"] }
+#
+# 0.3 -> 0.4 升级要点（向下兼容，本项目无需改代码）：
+#   - 新增 `derive` feature（属 default，未显式关闭即启用）：
+#     提供 #[derive(SmlSerialize, SmlDeserialize)]，可让 Rust 结构体
+#     直接与 SML 互转（sml::to_string / sml::from_str），无需 serde 中转。
+#   - 新增 `parse_file` / `parse_file_versioned`：直接解析文件并展开 include。
+#   - 既有 API（parse / parse_versioned / to_sml / serde 中转）签名与语义不变。
+#
+# 本项目 config / draft / history 仍走 serde_json 中转（`serde` feature），
+# 与 derive 路径共存；后续如需去掉 serde_json 依赖，可改用 derive 直接映射。
+swsml = { version = "0.4", path = "../sml/rust", features = ["serde"] }
 
 [build-dependencies]
+# 编译 ui/*.slint。
+#
+# **不能做成 optional**：Cargo 不会把 package feature 以 `--cfg` 形式传给
+# build script（只设置 CARGO_FEATURE_GUI 环境变量），因此 build.rs 里的
+# `#[cfg(feature = "gui")]` 恒为 false。若把 slint-build 设为 optional 并
+# 用 cfg 门控调用它的函数，就会出现「feature 开启时函数却被裁掉」的 E0425。
+# 故它保持为普通 build-dependency，由 build.rs 读环境变量决定是否真正编译
+# .slint —— 纯 CLI 构建只是不执行编译，主 crate 仍不含 Slint 运行时。
 slint-build = "1.8"
 # Windows 下把 assets/logo.ico 嵌入 exe 资源（任务栏图标）；纯 Rust 实现，无需外部 rc.exe
 embed-resource = "3"

@@ -1,0 +1,101 @@
+# 构建校验：三平台 × 两种 feature 形态
+#
+# 两种形态（见 Cargo.toml [features]）：
+#   default（含 gui）     -> 完整桌面应用（Slint GUI + CLI）
+#   --no-default-features -> 纯 CLI 二进制（不含 Slint 运行时）
+#
+# 关键点：
+# - **path 依赖**：swi18n / swsml 以 path 引用仓库外的 ../swi18n 与 ../sml/rust，
+#   Actions 里 checkout 后这些路径不存在，必须先 clone 到对应位置，否则 cargo 直接报错。
+#   （同时写了 version，本地开发用 path、发布用 crates.io；CI 走 path。）
+# - **字体**：ui/MiSans VF.ttf（19 MiB）随仓库分发，build.rs 检测到即内嵌；
+#   缺失时会回退系统字体，构建同样成功，因此这里不做额外处理。
+name: 构建
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.profile }}
+    runs-on: ${{ matrix.os }}
+    # 额度控制：GitHub Actions 按分钟计费且平台倍率不同
+    #   Linux ×1 / Windows ×2 / **macOS ×10**（私有仓库免费额度 2000 分钟/月）
+    # 故 PR 只跑最便宜的 Linux 验证，macOS 仅在 push 主分支 / 手动触发时参与，
+    # 避免日常协作把月度额度耗在 macOS runner 上。
+    if: github.event_name != 'pull_request' || matrix.os == 'ubuntu-latest'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # gui   = 完整桌面应用（默认）
+        # cli   = 纯 CLI（--no-default-features）
+        profile: [gui, cli]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取 path 依赖（swi18n / swsml）
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 与 Cargo.toml 中的 path 保持一致：../swi18n 与 ../sml/rust
+          git clone --depth 1 https://gitee.com/snoware/swi18n.git ../swi18n
+          git clone --depth 1 https://gitee.com/snoware/sml.git ../sml
+          ls ../swi18n/Cargo.toml ../sml/rust/Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 Linux 系统依赖（Slint 需要字体与窗口系统库）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libfontconfig1-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev
+
+      - name: 构建
+        shell: bash
+        run: |
+          if [ "${{ matrix.profile }}" = "cli" ]; then
+            cargo build --release --no-default-features
+          else
+            cargo build --release
+          fi
+
+      - name: 校验两种形态（仅 gui 组合，避免重复）
+        if: matrix.profile == 'gui'
+        shell: bash
+        run: python tools/check_builds.py
+
+      - name: CLI 自检（纯 CLI 组合）
+        if: matrix.profile == 'cli'
+        shell: bash
+        run: |
+          BIN=target/release/resender
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          "$BIN" version
+          "$BIN" help
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: resender-${{ matrix.os }}-${{ matrix.profile }}
+          path: |
+            target/release/resender
+            target/release/resender.exe
+          if-no-files-found: ignore
+          retention-days: 7
