@@ -67,6 +67,13 @@ jobs:
             libxkbcommon-dev \
             libssl-dev
 
+      - name: 获取界面字体（官方源按需下载）
+        shell: bash
+        run: |
+          # 官方包整包 217 MB，fetch_font.py 只取需要的那一项（约 13.7 MB）。
+          # 字体缺失时 build.rs 回退系统字体，构建仍能通过，故此处不设 -e 中断。
+          python tools/fetch_font.py || echo "字体获取失败，本次构建回退系统字体"
+
       - name: 构建
         shell: bash
         run: |

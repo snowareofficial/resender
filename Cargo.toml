@@ -18,11 +18,14 @@ categories = ["email", "command-line-utilities"]
 # 不随 crate 发布的内容：
 # - 生成产物与 Python 缓存（tools/ 脚本本身保留，是哈希重算等维护工作所需）
 # - **界面字体**：`ui/MiSans VF.ttf` 有 19 MiB，占包体积 95%+。
-#   crates.io 的上传上限是 **10 MB**，带字体必然被拒（服务端返回 503）。
-#   且 MiSans 许可禁止「单独分发字体」，不随 crate 分发反而更合规。
-#   字体仅按名字引用（Theme.font_family = "MiSans VF"），未被 .slint import，
-#   故缺失时仍能编译，运行时回退系统字体。
-#   从仓库源码构建（含字体）即使用 MiSans；从 crates.io 安装则用系统字体。
+#   两个原因都不让它随 crate 分发：
+#     1) crates.io 上传上限 **10 MB**，带字体必然被拒（服务端返回 503）；
+#     2) MiSans 许可禁止「单独分发字体」，不随包分发反而更合规。
+#   字体也不进 git 仓库（见 .gitignore），构建时从官方源按需获取：
+#       python tools/fetch_font.py
+#   （官方整包 217 MB，该脚本只取需要的那一项，约 13.7 MB。）
+#   字体仅按名字引用（Theme.font_family = "MiSans VF"），缺失时仍能编译，
+#   运行时回退系统字体。
 exclude = [
     "/generated-images",
     "/tools/__pycache__",

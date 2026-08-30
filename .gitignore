@@ -9,3 +9,12 @@ wrangler.log
 wrangler.err
 /tools/__pycache__
 __pycache__
+
+# 界面字体：MiSans 许可禁止「单独分发字体」，故不进仓库。
+# 构建时从官方源按需获取（只下 13.7 MB，非整包 217 MB）：
+#     python tools/fetch_font.py
+# 缺失时 build.rs 会回退系统字体，构建与运行均不受影响。
+/ui/MiSans VF.ttf
+
+# 本地字体副本（切换字体获取方式时的兜底备份，非构建所需）
+/build/local_font_keep.ttf

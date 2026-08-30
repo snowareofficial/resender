@@ -101,8 +101,11 @@ tools/
   check_ico.py          # 校验生成的图标
   disk_report.py        # 磁盘占用 / 打包体积报告
   rehash_builtin.py     # 重新计算内置资源（脚本）的哈希
-  check_builds.py       # 校验 gui / 纯 CLI 两种 feature 形态都能构建
+  check_builds.py       # 校验 gui / 纯 CLI 两种形态都能构建 + workflow YAML
+  check_workflows.py    # 校验 .github/workflows 的 YAML（语法 / 必需字段 / Tab）
   setup_github_mirror.py # 用 gh 建立 Gitee→GitHub 镜像仓库并首次同步
+  fetch_font.py         # 从官方源按需获取 MiSans VF 字体（只下 13.7 MB，非整包 217 MB）
+  verify_font.py        # 校验内置字体文件完整性
 .github/workflows/
   sync-from-gitee.yml   # 单向镜像：Gitee -> GitHub（每 6 小时，带防覆盖保护）
   build.yml             # 三平台 × 两种形态构建校验
@@ -136,12 +139,17 @@ LICENSE                 # 版权声明 + 许可证全文 + 第三方组件许可
 ## 构建与运行
 
 ```bash
+# 1) 获取界面字体（可选，缺失时回退系统字体）
+python tools/fetch_font.py
+
+# 2) 构建 / 运行
 cargo run --release
 # 或仅构建
 cargo build --release
 ```
 
 > 桌面端依赖系统 WebView（Windows 自带 WebView2）。首次 `cargo build` 会下载并编译 Slint / libsmx 等 crate，耗时较长。
+> 字体不进仓库，从仓库克隆后需先执行 `python tools/fetch_font.py` 才能使用 MiSans。
 
 ### crate 分区：GUI 与 CLI 两种形态
 
@@ -179,16 +187,34 @@ feature 以 `--cfg` 形式传给 build script**（只设置 `CARGO_FEATURE_GUI` 
 - **构建**：`.github/workflows/build.yml` 覆盖 Linux / Windows / macOS ×
   `gui` / `cli` 两种形态。因 Actions 对 macOS 按 10 倍分钟计费，PR 只跑 Linux，
   macOS 仅在 push 主分支或手动触发时参与。
-- **字体**：`ui/MiSans VF.ttf`（19 MiB）随仓库分发，`build.rs` 检测到即内嵌；
-  缺失时回退系统字体，构建同样成功。
+- **字体**：`ui/MiSans VF.ttf`（19 MiB）**不进仓库**，构建时从官方源按需获取：
+
+  ```bash
+  python tools/fetch_font.py            # 已存在则跳过
+  python tools/fetch_font.py --list     # 查看官方包内有哪些字体
+  python tools/fetch_font.py --diff     # 与本地字体比对（不写入）
+  python tools/fetch_font.py --force    # 强制更新为官方最新版
+  ```
+
+  官方整包（`hyperos.mi.com/font-download/MiSans.zip`）有 **217 MB**，脚本利用
+  ZIP 中央目录在尾部 + 服务器支持 Range 的特性，**只下载需要的那一项（约 13.7 MB）**。
+  字体缺失时 `build.rs` 回退系统字体，构建与运行均不受影响。
+
+  不进仓库的原因：MiSans 许可禁止「单独分发字体」，把字体放进公开仓库等于
+  分发字体本身；改为构建时获取，既合规又让仓库从约 20 MB 降到约 1 MB。
 
 首次建立镜像仓库（需先安装并登录 GitHub CLI：
 `winget install --id GitHub.cli -e` → `gh auth login --web`）：
 
 ```bash
 python tools/setup_github_mirror.py --check     # 检查环境是否就绪
-python tools/setup_github_mirror.py --private   # 建私有仓库并首次全量镜像
+python tools/setup_github_mirror.py             # 默认建公开仓库并首次全量镜像
+python tools/setup_github_mirror.py --private   # 需要时改为私有
 ```
+
+GitHub 镜像设为**公开**：字体已不进仓库，不再有合规顾虑；公开仓库的 Actions
+免费额度不限（私有为 2000 分钟/月），且代码在 Gitee 上本就是公开的，公开镜像
+不增加暴露面。
 
 > **注意**：本地改动必须先推送到 Gitee，否则下一次定时同步会用 Gitee 的旧内容
 > 覆盖 GitHub（单向镜像，GitHub 侧不回写）。

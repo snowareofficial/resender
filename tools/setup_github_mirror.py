@@ -216,6 +216,9 @@ def main():
         return 0 if ok else 1
 
     if args.public == args.private:       # 都没给或都给了
+        # 默认公开：字体已不进仓库（构建时从官方源获取），
+        # 不再有「公开即等于分发字体」的合规顾虑；公开仓库的 Actions 免费额度不限。
+        # 代码在 Gitee 上本就是公开的（gitee.com/snoware/resender），公开镜像不增加暴露面。
         visibility = "public"
         print("[-] 未指定可见性，默认 public（可用 --private 改为私有）")
     else:

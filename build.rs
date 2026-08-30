@@ -99,7 +99,7 @@ fn generate_font_import(out_dir: &std::path::Path) {
     let font = std::path::Path::new("ui").join("MiSans VF.ttf");
     let out = out_dir.join("fonts.slint");
     let content = if font.exists() {
-        // 从仓库源码构建：嵌入 MiSans。
+        // 字体存在：嵌入 MiSans。
         // 注意：字体 import 写 "MiSans VF.ttf"（相对 ui/ 目录），Slint 会
         // 在 include_paths（含 ui/）中解析它。
         // 额外导出 FontsLoaded 是为满足 Slint 的 import 语法（要求被导入
@@ -108,14 +108,23 @@ fn generate_font_import(out_dir: &std::path::Path) {
          import \"MiSans VF.ttf\";\n\
          export component FontsLoaded inherits Rectangle { }\n"
     } else {
-        // 从 crates.io 安装：无字体文件，回退系统字体
-        "// 由 build.rs 生成：未找到 MiSans VF.ttf（crates.io 分发版不含字体），\n\
-         // 运行时回退系统字体。从仓库源码构建即会使用 MiSans。\n\
+        // 字体缺失：回退系统字体。
+        // 两种情形都会走到这里，构建均不失败：
+        //   1) 从 crates.io 安装（crate 不含字体，见 Cargo.toml exclude）
+        //   2) 从仓库源码构建但未获取字体（字体不进仓库，需
+        //      `python tools/fetch_font.py` 从官方源获取）
+        "// 由 build.rs 生成：未找到 MiSans VF.ttf，运行时回退系统字体。\n\
+         // 需要 MiSans 时执行：python tools/fetch_font.py\n\
          export component FontsLoaded inherits Rectangle { }\n"
     };
     std::fs::write(&out, content).expect("写入 fonts.slint 失败");
     if font.exists() {
         println!("cargo:rerun-if-changed=ui/MiSans VF.ttf");
+    } else {
+        println!(
+            "cargo:warning=未找到 ui/MiSans VF.ttf，界面将回退系统字体；\
+             如需 MiSans 请运行 python tools/fetch_font.py"
+        );
     }
     println!("cargo:warning=字体模式: {}", if font.exists() { "内置 MiSans VF" } else { "系统字体回退" });
 }

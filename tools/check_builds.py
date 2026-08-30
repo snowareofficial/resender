@@ -12,6 +12,9 @@
 用法：
     python tools/check_builds.py            # cargo check（快）
     python tools/check_builds.py --build    # cargo build（慢，但能验链接）
+
+顺带校验 .github/workflows 的 YAML（语法错误要到 Actions 跑一次才暴露，
+本地先拦住更省事）；PyYAML 未安装时自动跳过该步。
 """
 
 import re
@@ -95,6 +98,16 @@ def main():
         for l in output.splitlines():
             if l.strip().startswith("Finished"):
                 print("   ", l.strip())
+
+    # 顺带校验 workflow YAML（缺 PyYAML 时脚本内部已降级为跳过）
+    print(f"\n{'=' * 62}\nworkflow YAML 校验\n{'=' * 62}")
+    wf = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "check_workflows.py")],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    print((wf.stdout or "") + (wf.stderr or ""))
+    if wf.returncode != 0:
+        failed = True
 
     print("\n" + ("全部通过" if not failed else "存在失败"))
     return 1 if failed else 0
