@@ -26,11 +26,6 @@ jobs:
   build:
     name: ${{ matrix.os }} / ${{ matrix.profile }}
     runs-on: ${{ matrix.os }}
-    # 额度控制：GitHub Actions 按分钟计费且平台倍率不同
-    #   Linux ×1 / Windows ×2 / **macOS ×10**（私有仓库免费额度 2000 分钟/月）
-    # 故 PR 只跑最便宜的 Linux 验证，macOS 仅在 push 主分支 / 手动触发时参与，
-    # 避免日常协作把月度额度耗在 macOS runner 上。
-    if: github.event_name != 'pull_request' || matrix.os == 'ubuntu-latest'
     strategy:
       fail-fast: false
       matrix:
@@ -38,6 +33,19 @@ jobs:
         # gui   = 完整桌面应用（默认）
         # cli   = 纯 CLI（--no-default-features）
         profile: [gui, cli]
+      #
+      # 额度说明：若仓库是私有的，Actions 计费倍率为 Linux ×1 / Windows ×2 /
+      # **macOS ×10**，免费额度 2000 分钟/月。此时可用 matrix.exclude 在 PR 时
+      # 排除高倍率平台，例如：
+      #     exclude:
+      #       - os: windows-latest
+      #         profile: ${{ 'x' }}        # 条件排除需用静态值或 step 级 if
+      #
+      # **切勿写成 job 级 `if: github.event_name != 'pull_request' || matrix.os == ...`**：
+      # job 级 if 求值时矩阵尚未展开，GitHub 会报
+      #   "Unrecognized named-value: 'matrix'"
+      # 并使整个 workflow 变成无效文件（表现为 jobs=0、0 秒失败，且不触发任何构建）。
+      # 本仓库已设为公开（免费额度不限），故跑完整矩阵。
 
     steps:
       - uses: actions/checkout@v4

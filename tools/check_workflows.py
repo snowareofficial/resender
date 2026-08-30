@@ -118,6 +118,19 @@ def main():
                     print(f"  [错误] job `{jid}` 第 {i} 步缺少 uses/run：{st}")
                     errors += 1
 
+            # 6) job 级 if 不得引用 matrix 上下文
+            #
+            # 真实踩坑：job 级 `if: ... || matrix.os == 'ubuntu-latest'` 会让 GitHub
+            # 报 "Unrecognized named-value: 'matrix'"，使**整个 workflow 变成无效文件**
+            # —— 表现是运行 0 秒失败、jobs 为空、且不触发任何构建，极难察觉。
+            # 原因：job 级 if 求值时矩阵尚未展开。需改用 matrix.exclude 或 step 级 if。
+            job_if = job.get("if")
+            if isinstance(job_if, str) and "matrix" in job_if:
+                print(f"  [错误] job `{jid}` 的 if 引用了 matrix 上下文：{job_if}")
+                print("         job 级 if 求值时矩阵未展开，会导致整个 workflow 失效。")
+                print("         改用 matrix.exclude 或把条件移到 step 级 if。")
+                errors += 1
+
     print("\n" + ("全部通过" if errors == 0 else f"发现 {errors} 处问题"))
     return 1 if errors else 0
 
