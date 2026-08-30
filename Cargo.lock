@@ -4622,7 +4622,7 @@ dependencies = [
 
 [[package]]
 name = "resender"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",

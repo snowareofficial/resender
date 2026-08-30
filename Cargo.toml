@@ -1,6 +1,6 @@
 [package]
 name = "resender"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
 authors = ["S.A. <https://blog.swebase.cn>"]
 # MulanPubL-2.0（木兰公共许可证 v2）不在 SPDX 标准列表中，crates.io 无法

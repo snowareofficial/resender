@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 use config::{AppConfig, PLANS, compute_quota, gregorian_std};
 use history::HistoryStore;
-use rhai_ext::{RhaiContext, SORG_BANNER, build_engine, compile_script, make_scope};
+use rhai_ext::{BUILTIN_SCRIPT, RhaiContext, SORG_BANNER, build_engine, compile_script, compile_script_from_str, make_scope};
 
 /// 应用版本：唯一来源为 Cargo.toml 的 `version`（编译期展开）。
 /// GUI 关于页与 CLI `--version` 均读取此常量，发版后自动同步。
@@ -74,13 +74,12 @@ fn now_iso_string() -> String {
 }
 
 fn scripts_dir() -> PathBuf {
-    // 优先使用可执行文件同级的 scripts/，否则用源码 scripts/
+    // 始终优先返回「可执行文件同级的 scripts/default.rhai」作为权威路径：
+    // 这样自解压（运行时写出内置脚本）与热重载（reload）都落在 exe 同级，
+    // 不再依赖启动时的 current_dir。
     let exe = std::env::current_exe().unwrap_or_default();
     if let Some(dir) = exe.parent() {
-        let p = dir.join("scripts").join("default.rhai");
-        if p.exists() {
-            return p;
-        }
+        return dir.join("scripts").join("default.rhai");
     }
     let mut p = std::env::current_dir().unwrap_or_default();
     p.push("scripts");
@@ -105,15 +104,34 @@ fn setup() -> Result<(Arc<rhai::Engine>, rhai::AST, Arc<RhaiContext>, PathBuf)> 
     let engine = Arc::new(engine);
 
     let script_path = scripts_dir();
+    // 解析脚本源：优先使用 exe 同级的外部脚本（允许部署后覆盖/热改）；
+    // 若外部脚本缺失，则从编译期嵌入的内置副本自解压（写出到同级 scripts/
+    // 目录）并直接使用内存内容，从而实现「单 exe 自包含、无需附带 scripts」。
+    let script_src: String = if script_path.exists() {
+        std::fs::read_to_string(&script_path)
+            .map_err(|e| anyhow::anyhow!("读取脚本 {script_path:?} 失败: {e}"))?
+    } else {
+        if let Some(parent) = script_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&script_path, BUILTIN_SCRIPT) {
+            eprintln!("提示：无法自解压脚本到 {script_path:?}（{e}），将使用内置副本运行");
+        }
+        BUILTIN_SCRIPT.to_string()
+    };
     // 内置脚本完整性校验：计算 SM3 哈希，匹配官方快照则视为
     // 「自带且未修改」，自动授予信任（builtin_verified=true）。
     // 任何被篡改/替换的脚本哈希不匹配，必须显式 unlock 才能信任，
     // 从而「自动信任仅限自带未修改脚本」，不破坏安全能力。
     {
-        let raw = std::fs::read(&script_path).unwrap_or_default();
         // 与 build.rs 编译期校验保持一致：按 LF 归一化后计算哈希，
         // 避免磁盘 CRLF 与仓库 LF 差异导致运行期误判为「脚本被篡改」。
-        let src: Vec<u8> = raw.iter().copied().filter(|&b| b != b'\r').collect();
+        let src: Vec<u8> = script_src
+            .as_bytes()
+            .iter()
+            .copied()
+            .filter(|&b| b != b'\r')
+            .collect();
         let mut h = libsmx::sm3::Sm3Hasher::new();
         h.update(&src);
         let digest = h.finalize();
@@ -130,7 +148,7 @@ fn setup() -> Result<(Arc<rhai::Engine>, rhai::AST, Arc<RhaiContext>, PathBuf)> 
             );
         }
     }
-    let ast = compile_script(&engine, &script_path)?;
+    let ast = compile_script_from_str(&engine, &script_src)?;
     // 执行一次脚本顶层语句：触发 api::register 等初始化（i18n/主题/自动化注册）
     if let Err(e) = engine.run_ast(&ast) {
         eprintln!("脚本初始化执行警告: {e}");

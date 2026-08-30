@@ -876,6 +876,10 @@ pub fn build_engine() -> Engine {
     engine
 }
 
+/// 内置脚本：编译期嵌入 exe，运行时无需外部文件即可启动 GUI/CLI。
+/// 路径相对本 crate 根（src/ 的父目录），与 build.rs 的脚本源一致。
+pub const BUILTIN_SCRIPT: &str = include_str!("../scripts/default.rhai");
+
 /// 加载脚本文件（默认 scripts/default.rhai），返回 AST
 pub fn compile_script(engine: &Engine, path: &PathBuf) -> Result<AST> {
     let src = std::fs::read_to_string(path)
@@ -883,6 +887,12 @@ pub fn compile_script(engine: &Engine, path: &PathBuf) -> Result<AST> {
     let ast = engine.compile(&src)
         .map_err(|e| anyhow::anyhow!("脚本编译失败: {e}"))?;
     Ok(ast)
+}
+
+/// 直接从字符串编译脚本（用于编译期嵌入的内置脚本，不依赖外部文件）。
+pub fn compile_script_from_str(engine: &Engine, src: &str) -> Result<AST> {
+    engine.compile(src)
+        .map_err(|e| anyhow::anyhow!("内置脚本编译失败: {e}"))
 }
 
 /// 在脚本作用域中注入标准变量（to/from/subject/body 等）
