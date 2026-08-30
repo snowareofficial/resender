@@ -44,26 +44,46 @@ pub struct HistoryStore {
 }
 
 impl HistoryStore {
+    /// 当前历史路径（SML）。
     pub fn new() -> Result<Self> {
-        let mut dir = dirs::config_dir().ok_or_else(|| anyhow::anyhow!("无法定位配置目录"))?;
-        dir.push("resender");
-        fs::create_dir_all(&dir)?;
-        dir.push("history.json");
+        let mut dir = Self::dir()?;
+        dir.push("history.sml");
         Ok(Self { path: dir })
     }
 
+    /// 旧版历史路径（JSON），仅用于一次性迁移。
+    fn legacy_path(&self) -> Option<PathBuf> {
+        Self::dir().ok().map(|mut d| {
+            d.push("history.json");
+            d
+        })
+    }
+
+    fn dir() -> Result<PathBuf> {
+        let mut dir = dirs::config_dir().ok_or_else(|| anyhow::anyhow!("无法定位配置目录"))?;
+        dir.push("resender");
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
     fn read_all(&self) -> Vec<HistoryEntry> {
-        if !self.path.exists() {
-            return Vec::new();
+        // 优先 SML；回退旧 JSON 并自动迁移
+        match self.legacy_path() {
+            Some(json_p) => crate::sml_store::load_migrating::<Vec<HistoryEntry>>(
+                &self.path,
+                &json_p,
+            )
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+            None => Vec::new(),
         }
-        let s = fs::read_to_string(&self.path).unwrap_or_default();
-        serde_json::from_str::<Vec<HistoryEntry>>(&s).unwrap_or_default()
     }
 
     fn write_all(&self, entries: &[HistoryEntry]) {
-        if let Ok(s) = serde_json::to_string_pretty(entries) {
-            let _ = fs::write(&self.path, s);
-        }
+        // 历史是对象数组，SML 顶层数组由 dump_inline 输出（单行内联）。
+        // 这里改用「带键的块」形式更好读，但会改变结构，故保持数组语义不变。
+        let _ = crate::sml_store::save(&self.path, &entries);
     }
 
     /// 追加一条记录（保留最多 1000 条，最新在前）

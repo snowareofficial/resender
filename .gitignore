@@ -1,2 +1,11 @@
 /target
 out_test.txt
+
+# 官网（Hugo + wrangler）及本地缓存：不进 git，也不随 crate 发布
+/site
+/.wrangler
+/.hugo_build.lock
+wrangler.log
+wrangler.err
+/tools/__pycache__
+__pycache__

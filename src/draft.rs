@@ -23,32 +23,49 @@ pub struct Draft {
 }
 
 impl Draft {
+    /// 当前草稿路径（SML）。
     pub fn path() -> Result<PathBuf> {
-        let mut dir = dirs::config_dir().ok_or_else(|| anyhow::anyhow!("无法定位配置目录"))?;
-        dir.push("resender");
-        fs::create_dir_all(&dir)?;
+        let mut dir = Self::dir()?;
+        dir.push("draft.sml");
+        Ok(dir)
+    }
+
+    /// 旧版草稿路径（JSON），仅用于一次性迁移。
+    fn legacy_path() -> Result<PathBuf> {
+        let mut dir = Self::dir()?;
         dir.push("draft.json");
         Ok(dir)
     }
 
-    pub fn load() -> Option<Draft> {
-        Self::path()
-            .ok()
-            .filter(|p| p.exists())
-            .and_then(|p| fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
+    fn dir() -> Result<PathBuf> {
+        let mut dir = dirs::config_dir().ok_or_else(|| anyhow::anyhow!("无法定位配置目录"))?;
+        dir.push("resender");
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
     }
 
+    /// 载入草稿：优先 SML，回退旧 JSON 并自动迁移。
+    pub fn load() -> Option<Draft> {
+        let (sml_p, json_p) = (Self::path().ok()?, Self::legacy_path().ok()?);
+        crate::sml_store::load_migrating::<Draft>(&sml_p, &json_p)
+            .ok()
+            .flatten()
+    }
+
+    /// 保存为 SML（原子写）。
     pub fn save(&self) -> Result<()> {
         let p = Self::path()?;
-        fs::write(p, serde_json::to_string_pretty(self)?)?;
-        Ok(())
+        crate::sml_store::save(&p, self)
     }
 
+    /// 删除草稿（SML 与遗留 JSON 一并清理，避免旧文件复活）。
     pub fn clear(&self) -> Result<()> {
-        let p = Self::path()?;
-        if p.exists() {
-            fs::remove_file(p)?;
+        for p in [Self::path().ok(), Self::legacy_path().ok()] {
+            if let Some(p) = p {
+                if p.exists() {
+                    fs::remove_file(p)?;
+                }
+            }
         }
         Ok(())
     }

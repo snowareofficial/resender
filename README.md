@@ -1,4 +1,19 @@
-# SWE::Resender — Resend 发信工具
+# SWE::Resender — Resend 发信工具 ｜ Email Sending Tool
+
+**SWE Serial `<< 19 * 55 >>`** — 1955
+
+> **谨以此编号纪念 1955 年 10 月 1 日新疆维吾尔自治区建立。** \
+> This serial number is dedicated to the establishment of the Xinjiang Uygur
+> Autonomous Region on 1 October 1955.
+
+**Resender** is a cross-platform desktop email client (built with [Slint](https://slint.dev/))
+that sends email through the [Resend](https://resend.com) API. All business logic is
+driven by Rhai scripts; it supports Markdown-to-HTML conversion, fixed From names,
+send counters, per-category SM4-GCM encryption, drafts, SML persistence and large
+attachment upload progress.
+
+> 中文正文在下方，**English** 版本见文末。
+> The Chinese documentation follows; an **English** summary is at the end.
 
 **SWE Serial `<< 19 * 55 >>`**（档案见 crossduty/1955.md）
 
@@ -30,26 +45,38 @@ GUI 框架 Slint 采用 `LicenseRef-Slint-Royalty-free-2.0`。
   - 可分别勾选「加密 API Key」「加密发信名称」
   - **多项同一密码**：两个分类用同一个加密密码保护，密码本身不落盘，仅存密文
   - 解密时使用同一密码还原
-- **完善历史记录（永久保存）**：每次发信（成功 / 失败 / 被禁止）均写入本地 `history.json`，
+- **完善历史记录（永久保存）**：每次发信（成功 / 失败 / 被禁止）均写入本地 `history.sml`，
   历史页展示全部记录（上限 1000 条），可用「清空历史」（带二次确认）永久删除
-- 配置（含明文或密文）持久化到本地 `config.json`
+- **草稿保存 / 恢复**：发信页可「存为草稿」，内容写入 `draft.sml`，**下次启动自动恢复**；
+  可在设置中选择发送成功后是否保留表单内容（默认清空）
+- **大附件上传进度**：发送时状态栏实时显示 `3.2 MB / 10.0 MB（32%）`，
+  并带每秒刷新；请求带超时（连接 15s，总超时按附件大小缩放至多 300s），不会卡死
+- **版本检查**：启动时静默比对远端 VersionFile（SML 格式），有更新则在状态栏提示
+- **配置 / 草稿 / 历史统一用 SML 落盘**，并**应用 SML 契约**在读取时校验字段类型、
+  补齐缺失默认值；配置被手改坏时会显式告警而非静默丢失
 
 ## 目录结构
 
 ```
 src/
-  main.rs       # Slint 宿主：注册 Rhai 原语、编译脚本、UI 回调
-  rhai_ext.rs   # Rhai 引擎 + 原语模块（http / crypto / store / ui / trust / api / markdown）
+  main.rs       # Slint 宿主：注册 Rhai 原语、编译脚本、UI 回调、CLI 模式分发
+  rhai_ext.rs   # Rhai 引擎 + 原语模块（http / crypto / store / ui / trust / api / markdown / sml）
   crypto.rs     # libsmx 国密 SM4-GCM + SM3 KDF 加解密
-  config.rs     # 配置持久化、套餐定义、日期算法
-  history.rs    # 发信历史记录持久化
+  resend.rs     # Resend API 请求/响应结构（SendRequest / SendResponse）与字段约束
+  config.rs     # 配置持久化（SML + 契约校验）、套餐定义、日期算法
+  draft.rs      # 草稿保存 / 恢复 / 清空（SML）
+  history.rs    # 发信历史记录持久化（SML）
   log.rs        # 加密运行日志（本地随机密钥 + SM4-GCM 密文落盘）
   markdown.rs   # Markdown → 邮件友好 HTML（comrak 解析 + css-inline 内联）
+  sml_store.rs  # 通用 SML 持久化层（原子写、JSON 迁移、契约）
+  i18n.rs       # 消息目录（swi18n），自动识别系统语言
+  update.rs     # 远端 VersionFile（SML）解析与版本比对
 ui.slint        # 主窗口：布局装配 + 回调接线
 ui/
   theme.slint       # 主题单例 Theme
   widgets.slint     # 通用控件（Card/PrimaryButton/FieldBox/NavItem/...）
   chrome.slint      # 自定义顶栏 TitleBar + 侧栏 NavRail
+  fonts.slint       # 由 build.rs 生成：内嵌 MiSans VF 字体（无字体文件时为空壳）
   tabs/
     compose.slint     # 发信页
     config.slint      # 设置页
@@ -58,13 +85,22 @@ ui/
     info.slint        # 关于页（含 Slint 标识与许可信息）
     automation.slint  # 自动化页
 scripts/
-  default.rhai  # 默认业务脚本：身份获取 / 禁止判定 / 发信 / 统计 / 自动化
-build.rs        # slint-build 编译 ui.slint
+  default.rhai   # 默认业务脚本：身份获取 / 禁止判定 / 发信 / 统计 / 自动化
+  default.rhai.sm3 # default.rhai 的 SM3 摘要（完整性校验用）
+  pkg_size.py    # 打包体积辅助脚本
+build.rs        # slint-build 编译 ui.slint；字体存在时生成 ui/fonts.slint 内嵌 MiSans VF
 tools/
   fetch_license.py      # 由权威副本生成 LICENSE（带完整性校验）
   add_license_header.py # 批量维护源文件 SPDX 许可头（幂等）
   verify_version.py     # 校验版本号单一来源为 Cargo.toml
+  verify_encrypted_logs.py # 校验加密运行日志可正常加解密
+  verify_font.py        # 校验内置字体文件完整性与 SPDX 头
+  font_info.py          # 打印内置字体元数据
   genlogo.py            # 生成 logo
+  genico.py             # 生成应用图标（.ico）
+  check_ico.py          # 校验生成的图标
+  disk_report.py        # 磁盘占用 / 打包体积报告
+  rehash_builtin.py     # 重新计算内置资源（脚本）的哈希
 LICENCE-MulanPublV2     # 木兰许可证 v2 权威正文副本（LICENSE 的生成来源）
 LICENSE                 # 版权声明 + 许可证全文 + 第三方组件许可
 ```
@@ -151,10 +187,14 @@ api::register("my.task", Fn("my_task"), "我的自动化任务");
 
 ```bash
 # 发信
-resender send --to a@b.c --subject "主题" --body "正文" [--html] [--from F] [--api-key K] [--password P]
+resender send --to a@b.c --subject "主题" --body "正文" \
+              [--html] [--from F] [--api-key K] [--password P] [--attach FILE]...
 
 # 运行脚本注册的自动化 handler
 resender run <handler名称> [参数...]
+
+# 检查更新（需在设置中配置 update_url）
+resender check-update
 
 # 打印版本（与 GUI 关于页同源，均取自 Cargo.toml）
 resender version
@@ -245,9 +285,31 @@ send_mail(to, subject, html, true, password, []);
 
 ## 配置文件位置
 
-- Windows: `%APPDATA%\resender\config.json`
-- macOS: `~/Library/Application Support/resender/config.json`
-- Linux: `~/.config/resender/config.json`
+配置、草稿、历史均以 **SML** 落盘（旧版 `.json` 会在首次读取时自动迁移并删除）：
+
+| 平台 | 目录 | 文件 |
+|---|---|---|
+| Windows | `%APPDATA%\resender\` | `config.sml`、`draft.sml`、`history.sml` |
+| macOS | `~/Library/Application Support/resender/` | 同上 |
+| Linux | `~/.config/resender/` | 同上 |
+
+另有 `logs.enc`（SM4-GCM 加密的运行日志）与 `logkey.bin`（本机日志密钥）。
+
+`config.sml` 内含**契约声明**，读取时校验字段类型并补齐缺失字段的默认值：
+
+```sml
+@contract ResenderConfig loose {
+    api_key: str default ""
+    plan_index: int min 0 default 0
+    keep_after_send: bool default false
+    ...
+}
+@is ResenderConfig
+api_key: re_xxx
+```
+
+契约选用 `loose`（允许未声明字段）是刻意的：将来新增配置项后，旧配置文件
+不会因含未知字段而被拒绝。
 
 ## 依赖
 
@@ -297,3 +359,132 @@ python tools/add_license_header.py           # 为缺失文件补上声明
 | 其余 Rust crate | 各自许可（多为 MIT / Apache-2.0），可用 `cargo tree` 查看 |
 
 Slint 官方标识（"Made with Slint"）及其许可说明显示在应用的「关于」页。
+
+---
+
+# English
+
+## Overview
+
+**Resender** is a cross-platform desktop app (built with [Slint](https://slint.dev/))
+that sends email through the [Resend](https://resend.com) API.
+
+**License**: `MulanPubL-2.0`. Additional restriction: without the author's written
+permission, citizens or organizations of EU / NATO member states may not use this
+software for **commercial** purposes (see the end of [LICENSE](LICENSE)).
+The Slint GUI framework uses `LicenseRef-Slint-Royalty-free-2.0`.
+
+Key traits: **all business logic is driven by Rhai scripts**,
+**Markdown bodies are converted to email-friendly HTML**,
+**fixed From name**, **send counters + plan quota**,
+**per-category password encryption (libsmx, SM4-GCM)**,
+**encrypted run logs**, **detailed history**.
+
+> **Everything is wired through Rhai**: Rust only registers safe primitives
+> (HTTP / crypto / store / UI feedback); identity resolution, send gating,
+> sending and accounting are assembled dynamically in `scripts/default.rhai`,
+> so behaviour can change without recompiling.
+
+## Features
+
+- Send text / HTML email via the Resend REST API; multiple recipients
+  (comma / semicolon / newline / space separated)
+- **Rhai-driven**: identity resolution, send gating, sending and counting
+- **Fixed From name** configured once in Settings
+- **Send counters**: total and current-period (cycle start, default 1st of month)
+- **Plan quota**: Free / Pro / Scale or a custom monthly limit;
+  remaining = quota − current-period count, turns red when exhausted
+- **Bundled font**: Xiaomi **MiSans VF** (shipped with the binary)
+- **Encrypted run logs**: `ui::log(...)` output is stored as SM4-GCM ciphertext
+  using a machine-local random key; viewable decrypted on the Script page
+- **Per-category encryption** with libsmx SM4-GCM (API key and From name
+  can be encrypted separately, sharing one password; the password is never stored)
+- **Persistent history**: every attempt (success / failure / blocked) is written
+  to `history.sml` (cap 1000), clearable with confirmation
+- **Drafts**: save the compose form to `draft.sml` and restore it on next launch;
+  Settings controls whether the form is kept after a successful send
+- **Large attachment progress**: the status bar shows `3.2 MB / 10.0 MB (32%)`
+  with per-second refresh; requests are time-bound (connect 15s, total scaled with
+  attachment size up to 300s) so the UI can never hang
+- **Update check**: on startup, a remote VersionFile (SML) is compared silently
+- **SML persistence with contracts**: config / draft / history are stored as SML
+  and validated against a contract on read (types checked, missing defaults filled);
+  a corrupted config triggers an explicit warning instead of silent loss
+
+## Build and run
+
+```bash
+cargo run --release
+# or just build
+cargo build --release
+```
+
+## Quick start
+
+1. Open **Settings** and fill in the Resend API key (`re_...`) and the **From name**.
+   Optionally set an **encryption password** and pick which fields to encrypt.
+   Choose the **Resend plan** (or a custom monthly quota) and the cycle start.
+2. Back on **Compose**: fill recipients, subject and body. The body has three modes
+   (switch via the tabs at the top-right of the editor):
+   - **Markdown** (default): tables, strikethrough, task lists, autolinks —
+     converted to inline-styled HTML on send
+   - **HTML**: sent as-is (you must inline styles yourself)
+   - **Plain text**: sent in the `text` field
+   Use **Browser preview** to see what the recipient will see.
+3. If the API key / From name are encrypted, enter the **same password** in
+   Settings and save first; it is used to decrypt at send time.
+
+## Command line
+
+```bash
+resender send --to a@b.c --subject "Subject" --body "Body" \
+              [--html] [--from F] [--api-key K] [--password P] [--attach FILE]...
+resender run <handler> [args...]     # run a script-registered automation handler
+resender check-update                # check for updates (needs update_url in Settings)
+resender version | --version | -V
+resender help
+```
+
+On Windows the release build uses the GUI subsystem (no console window on
+double-click), while CLI output still works in cmd / PowerShell.
+
+## Automation
+
+Scripts can register any function as a **named handler**, triggered from the GUI
+or the command line — no Rust changes or recompilation:
+
+```rhai
+fn my_task(args) {
+    let to = args[0];
+    send_mail(to, "Subject", "Body", false, "", []);
+    return "ok";
+}
+api::register("my.task", Fn("my_task"), "My automated task");
+```
+
+Three demos ship with the app: `demo.ping`, `demo.send_one`, `demo.bulk`.
+
+## Config file locations
+
+Config, drafts and history are stored as **SML** (legacy `.json` files are
+migrated and removed on first read):
+
+| Platform | Directory | Files |
+|---|---|---|
+| Windows | `%APPDATA%\resender\` | `config.sml`, `draft.sml`, `history.sml` |
+| macOS | `~/Library/Application Support/resender/` | same |
+| Linux | `~/.config/resender/` | same |
+
+## Dependencies
+
+`slint` 1.x · `libsmx` 0.3 (SM3 KDF + SM4-GCM) · `reqwest` (rustls-tls, no system
+OpenSSL) · `serde` / `serde_json` / `dirs` / `rand` / `base64` · `rhai` 1.x ·
+`rfd` 0.15 · `comrak` 0.54 (Markdown, GFM) · `css-inline` 0.21 ·
+`swi18n` 0.1 · `swsml` 0.1 (SML)
+
+## License
+
+MulanPubL-2.0 (full bilingual text in [LICENSE](LICENSE)). Third-party components
+are distributed under their own licenses — notably Slint
+(`LicenseRef-Slint-Royalty-free-2.0`) and MiSans VF
+(see [ui/font-license.txt](ui/font-license.txt)).

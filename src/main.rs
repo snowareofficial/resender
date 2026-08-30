@@ -19,6 +19,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod config;
+mod sml_store;
 mod crypto;
 mod draft;
 mod history;
@@ -46,6 +47,9 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// SWE Serial 编号：`<< 19 * 55 >>` = 1955，本项目的档案标识。
 /// 单一来源：GUI 关于页与 README 均引用此常量（crossduty/1955.md 档案与此对应）。
 pub const SWE_SERIAL: &str = "<< 19 * 55 >>";
+/// SWE Serial 编号来历（纪念性说明，显示于关于页）。
+pub const SWE_SERIAL_NOTE: &str =
+    "谨以此编号纪念 1955 年 10 月 1 日新疆维吾尔自治区建立。";
 
 /// 全局 Rhai 上下文（供原语模块通过 RHAI_CTX.get() 访问）
 pub static RHAI_CTX: std::sync::OnceLock<Arc<RhaiContext>> = std::sync::OnceLock::new();
@@ -101,6 +105,31 @@ fn setup() -> Result<(Arc<rhai::Engine>, rhai::AST, Arc<RhaiContext>, PathBuf)> 
     let engine = Arc::new(engine);
 
     let script_path = scripts_dir();
+    // 内置脚本完整性校验：计算 SM3 哈希，匹配官方快照则视为
+    // 「自带且未修改」，自动授予信任（builtin_verified=true）。
+    // 任何被篡改/替换的脚本哈希不匹配，必须显式 unlock 才能信任，
+    // 从而「自动信任仅限自带未修改脚本」，不破坏安全能力。
+    {
+        let raw = std::fs::read(&script_path).unwrap_or_default();
+        // 与 build.rs 编译期校验保持一致：按 LF 归一化后计算哈希，
+        // 避免磁盘 CRLF 与仓库 LF 差异导致运行期误判为「脚本被篡改」。
+        let src: Vec<u8> = raw.iter().copied().filter(|&b| b != b'\r').collect();
+        let mut h = libsmx::sm3::Sm3Hasher::new();
+        h.update(&src);
+        let digest = h.finalize();
+        let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+        // expected 由 build.rs 在编译期校验过「源码 == 快照」后注入，
+        // 此处仅作为运行期篡改检测的基线（若发布后脚本被改，哈希会不符）。
+        let expected = env!("RESENDER_BUILTIN_SCRIPT_SM3");
+        let verified = hex.eq_ignore_ascii_case(expected);
+        *ctx.builtin_verified.lock().unwrap() = verified;
+        if !verified {
+            eprintln!(
+                "[builtin-check] 警告：运行期脚本哈希({})与编译期快照({})不符，自动信任已禁用（需手动解锁）",
+                hex, expected
+            );
+        }
+    }
     let ast = compile_script(&engine, &script_path)?;
     // 执行一次脚本顶层语句：触发 api::register 等初始化（i18n/主题/自动化注册）
     if let Err(e) = engine.run_ast(&ast) {
@@ -210,8 +239,9 @@ fn main() -> Result<()> {
     ui.set_color_scheme(slint::private_unstable_api::re_exports::ColorScheme::Light);
     // 版本取自 Cargo.toml（APP_VERSION），发版后自动同步，无需在 UI 里手改
     ui.set_app_version(ss(APP_VERSION));
-    // SWE Serial 编号（单一来源 SWE_SERIAL）
+    // SWE Serial 编号（单一来源 SWE_SERIAL）+ 编号来历
     ui.set_swe_serial(ss(SWE_SERIAL));
+    ui.set_swe_serial_note(ss(SWE_SERIAL_NOTE));
     let cfg = AppConfig::load();
 
     // 平台检测：用于决定窗口控制按钮的位置/顺序（≥3 平台）
@@ -284,15 +314,16 @@ fn main() -> Result<()> {
         std::thread::spawn(move || {
             match crate::update::fetch_remote(&url) {
                 Ok(rv) if crate::update::has_update(APP_VERSION, &rv) => {
-                    if let Some(ui) = ui_weak_upd.upgrade() {
-                        let note = if rv.note.is_empty() {
-                            String::new()
-                        } else {
-                            format!("\n{}", rv.note)
-                        };
-                        let msg = format!("发现新版本 {}（当前 {}）{}", rv.latest, APP_VERSION, note);
+                    // 后台线程更新 UI 必须回到主线程事件循环，否则不刷新
+                    let note = if rv.note.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n{}", rv.note)
+                    };
+                    let msg = format!("发现新版本 {}（当前 {}）{}", rv.latest, APP_VERSION, note);
+                    with_ui(ui_weak_upd, move |ui| {
                         set_status_state(&ui, "发现新版本", 0, Some(msg));
-                    }
+                    });
                 }
                 _ => {}
             }
@@ -467,41 +498,129 @@ fn main() -> Result<()> {
             let mut scope = make_scope();
             // 设置全局 crypto_password
             scope.push("crypto_password", pw.clone());
+            // 阶段 1：准备正文（Markdown/HTML 转换等）
+            set_status_state_async(&ui_send, "正在准备正文…".to_string(), 0, None);
+            let t_body = std::time::Instant::now();
             let (final_body, html_b) = resolve_body(&body_s, mode);
+            let t_body_ms = t_body.elapsed().as_millis();
 
+            // 阶段 2：逐个读取并编码附件，实时反馈「第几个 / 共几个 + 文件名」，
+            // 让大附件的等待过程有可见进展，而不是干等一个「发送中…」。
             let mut attach_list: Vec<rhai::Dynamic> = Vec::new();
-            for path_str in &attach_paths {
+            let mut total_bytes: u64 = 0;
+            let t_attach = std::time::Instant::now();
+            let attach_total = attach_paths.len();
+            for (idx, path_str) in attach_paths.iter().enumerate() {
                 let p = std::path::Path::new(path_str);
+                let filename = p
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if attach_total > 0 {
+                    set_status_state_async(
+                        &ui_send,
+                        format!(
+                            "正在读取附件 {}/{}: {}",
+                            idx + 1,
+                            attach_total,
+                            filename
+                        ),
+                        0,
+                        None,
+                    );
+                }
                 match std::fs::read(p) {
                     Ok(bytes) => {
+                        total_bytes += bytes.len() as u64;
                         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                        let filename = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
                         let mut m = rhai::Map::new();
-                        m.insert("filename".into(), filename.into());
+                        m.insert("filename".into(), filename.clone().into());
                         m.insert("content".into(), b64.into());
                         attach_list.push(rhai::Dynamic::from(m));
                     }
                     Err(e) => {
-                        if let Some(ui) = ui_send.upgrade() {
-                            ui.set_status_text(ss(format!("读取附件失败: {e}")));
-                            ui.set_status_err(true);
+                        // 经事件循环回到主线程更新 UI，否则界面不刷新
+                        let msg = format!("读取附件失败: {e}");
+                        with_ui(ui_send.clone(), move |ui| {
+                            set_status_state(&ui, &msg, 2, None);
                             ui.set_sending(false);
-                        }
+                        });
                         return;
                     }
                 }
             }
+            let attach_count = attach_list.len();
+            let t_attach_ms = t_attach.elapsed().as_millis();
 
+            // 阶段 3：上传（最耗时）。提前告知规模，让用户知道「正在进行」而非卡死。
+            let size_desc = if attach_count > 0 {
+                format!("（{} 个附件，{}）", attach_count, human_size(total_bytes))
+            } else {
+                String::new()
+            };
+            set_status_state_async(&ui_send, format!("正在上传{}…", size_desc), 0, None);
+
+            // 上传心跳：脚本内的 HTTP 请求是同步的，期间无法细分进度；
+            // 用每秒刷新「已用 Ns」让用户明确看到任务仍在进行（而非界面假死/卡死）。
+            let hb_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let hb_flag = hb_stop.clone();
+            let hb_ui = ui_send.clone();
+            let hb_desc = size_desc.clone();
+            let heartbeat = std::thread::spawn(move || {
+                let mut secs = 0u64;
+                loop {
+                    // 每 0.5s 刷新一次，让 MB 进度变化看得见
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if hb_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    secs += 1;
+                    // 优先展示真实上传进度（MB/MB）；尚未开始上传时退化为计时
+                    let (sent, total) = rhai_ext::upload_progress();
+                    let text = if total > 0 {
+                        let pct = (sent as f64 / total as f64 * 100.0).min(100.0);
+                        format!(
+                            "正在上传{}… {:.1} MB / {:.1} MB（{:.0}%）",
+                            hb_desc,
+                            sent as f64 / MB_F,
+                            total as f64 / MB_F,
+                            pct
+                        )
+                    } else {
+                        format!("正在上传{}… 已用 {}s", hb_desc, secs / 2)
+                    };
+                    set_status_state_async(&hb_ui, text, 0, None);
+                }
+            });
+
+            let t_upload_start = std::time::Instant::now();
             let result: Result<(), Box<dyn std::error::Error>> = (|| {
                 eng.call_fn(&mut scope, &ast_c, "send_mail",
                     (to_s, subj_s, final_body, html_b, pw, attach_list))?;
                 Ok(())
             })();
-            // 读取状态
+            // 记录各阶段耗时到运行日志，便于定位「发送慢」到底慢在哪一环
+            let upload_ms = t_upload_start.elapsed().as_millis();
+            {
+                let mut logs = ctx_spawn.logs.lock().unwrap();
+                logs.push(format!(
+                    "[耗时] 准备正文 {}ms，读取附件 {}ms，网络发送 {}ms",
+                    t_body_ms, t_attach_ms, upload_ms
+                ));
+                let _ = ctx_spawn.log_store.append(&format!(
+                    "[耗时] 准备正文 {}ms，读取附件 {}ms，网络发送 {}ms",
+                    t_body_ms, t_attach_ms, upload_ms
+                ));
+            }
+            // 停止心跳（上传已结束）
+            hb_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = heartbeat.join();
+
+            // 读取脚本写入的最终状态
             let (status, is_err) = ctx_spawn.status.lock().unwrap().clone();
-            if let Some(ui) = ui_send.upgrade() {
-                // 最终状态：成功=绿(1) / 失败=红(2)
-                set_status_state(&ui, &status, if is_err { 2 } else { 1 }, None);
+            let final_state = if is_err { 2 } else { 1 };
+            with_ui(ui_send.clone(), move |ui| {
+                set_status_state(&ui, &status, final_state, None);
                 ui.set_sending(false);
                 // 刷新计数 + 历史
                 let c = AppConfig::load();
@@ -517,12 +636,13 @@ fn main() -> Result<()> {
                         clear_compose_form(&ui);
                     }
                 }
-            }
+            });
             if let Err(e) = result {
-                if let Some(ui) = ui_send.upgrade() {
-                    set_status_state(&ui, &format!("脚本执行错误: {e}"), 2, None);
+                let msg = format!("脚本执行错误: {e}");
+                with_ui(ui_send.clone(), move |ui| {
+                    set_status_state(&ui, &msg, 2, None);
                     ui.set_sending(false);
-                }
+                });
             }
         });
     });
@@ -827,6 +947,49 @@ fn main() -> Result<()> {
 
 /// 设置状态栏：文字 + 状态（0=进行中 1=成功 2=失败）+ 可选 toast 提示
 ///
+/// 从任意线程安全地更新 UI：把更新闭包投递到 Slint 事件循环（主线程）执行。
+///
+/// Slint 要求所有属性修改发生在主线程。若在后台线程直接 `ui.set_xxx()`，
+/// 界面通常**不会刷新**（表现为「一直卡在发送中」、状态永不变化），
+/// 严重时可能 panic。因此发送线程里的一切 UI 更新都必须经此函数。
+fn with_ui<F: FnOnce(App) + Send + 'static>(weak: slint::Weak<App>, f: F) {
+    if let Err(e) = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            f(ui);
+        }
+    }) {
+        eprintln!("投递 UI 更新失败: {e}");
+    }
+}
+
+/// `set_status_state` 的跨线程版本（供发送线程调用）。
+fn set_status_state_async(
+    weak: &slint::Weak<App>,
+    text: String,
+    state: i32,
+    toast: Option<String>,
+) {
+    with_ui(weak.clone(), move |ui| {
+        set_status_state(&ui, &text, state, toast)
+    });
+}
+
+/// 1 MB 的字节数（f64，用于进度换算）
+const MB_F: f64 = 1024.0 * 1024.0;
+
+/// 字节数转人类可读大小（用于附件进度提示）
+fn human_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 /// 进行中状态会**至少保持 0.2 秒**：操作即使瞬间完成，用户也能看到蓝色反馈，
 /// 不会出现"点了没反应"的观感。实现：先置蓝，再调度一个 0.2s 后的延迟
 /// 把状态改为最终结果（若期间又被置为新的进行中，则忽略旧调度）。
@@ -1140,6 +1303,7 @@ fn run_cli(args: &[String]) -> Result<()> {
         let mut api_key = String::new();
         let mut password = String::new();
         let mut html = false;
+        let mut attachments: Vec<String> = Vec::new();
         let mut i = 1;
         while i < args.len() {
             match args[i].as_str() {
@@ -1150,11 +1314,13 @@ fn run_cli(args: &[String]) -> Result<()> {
                 "--api-key" => { api_key = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                 "--password" => { password = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                 "--html" => { html = true; i += 1; }
+                // 附件：可重复传入多个 `--attach <路径>`
+                "--attach" => { attachments.push(args.get(i + 1).cloned().unwrap_or_default()); i += 2; }
                 _ => { i += 1; }
             }
         }
         if to.is_empty() || subject.is_empty() || body.is_empty() {
-            eprintln!("用法: resender send --to <收件人> --subject <主题> --body <正文> [--html] [--from <发信名>] [--api-key <key>] [--password <解密密码>]");
+            eprintln!("用法: resender send --to <收件人> --subject <主题> --body <正文> [--html] [--from <发信名>] [--api-key <key>] [--password <解密密码>] [--attach <附件路径>]...");
             std::process::exit(2);
         }
 
@@ -1212,11 +1378,34 @@ fn run_cli(args: &[String]) -> Result<()> {
             }
         }
 
+        // 读取并编码附件（可多次 --attach）；失败立即报错，不静默跳过
+        let mut attach_list: Vec<rhai::Dynamic> = Vec::new();
+        for path_str in &attachments {
+            let p = std::path::Path::new(path_str);
+            match std::fs::read(p) {
+                Ok(bytes) => {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    let filename = p
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let mut m = rhai::Map::new();
+                    m.insert("filename".into(), filename.into());
+                    m.insert("content".into(), b64.into());
+                    attach_list.push(rhai::Dynamic::from(m));
+                }
+                Err(e) => {
+                    eprintln!("读取附件失败 {path_str}: {e}");
+                    std::process::exit(4);
+                }
+            }
+        }
+
         let mut scope = make_scope();
         scope.push("crypto_password", password.clone());
         let result: Result<(), Box<dyn std::error::Error>> = (|| {
             engine.call_fn(&mut scope, &ast, "send_mail",
-                (to.clone(), subject.clone(), body.clone(), html, password, rhai::Array::new()))?;
+                (to.clone(), subject.clone(), body.clone(), html, password, attach_list.clone()))?;
             Ok(())
         })();
         if let Err(e) = result {
@@ -1282,7 +1471,7 @@ fn run_cli(args: &[String]) -> Result<()> {
         Ok(())
     } else {
         println!("Resender 命令行用法:");
-        println!("  resender send --to <收件人> --subject <主题> --body <正文> [--html] [--from <发信名>] [--api-key <key>] [--password <解密密码>]");
+        println!("  resender send --to <收件人> --subject <主题> --body <正文> [--html] [--from <发信名>] [--api-key <key>] [--password <解密密码>] [--attach <附件>]...");
         println!("  resender run <handler名称> [参数...]   运行脚本注册的自动化 handler");
         println!("  resender version | --version | -V      打印版本");
         println!("  resender check-update                   检查更新（需在设置中配置 update_url）");

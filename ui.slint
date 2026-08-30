@@ -16,7 +16,18 @@ import { AutomationTab } from "ui/tabs/automation.slint";
 
 // 嵌入小米 MiSans VF 可变字体，作为全局默认字体
 // 许可要求：应在软件中注明使用了 MiSans 字体（见「关于」页与 ui/font-license.txt）
-import "ui/MiSans VF.ttf";
+//
+// 注：字体 import 抽到独立的 `ui/fonts.slint`，由 build.rs 按字体文件是否
+// 存在生成其内容——
+//   - 字体存在（从仓库源码构建）-> 内容为 `import "ui/MiSans VF.ttf";`，使用 MiSans
+//   - 字体不存在（从 crates.io 安装）-> 内容为空，运行时回退系统字体
+// 原因：该字体 19 MiB，而 crates.io 上传上限为 10 MB，无法随 crate 分发；
+// 且 MiSans 许可禁止单独分发字体。Slint 的 import 无法条件化，故用此间接层。
+// 注：Slint 要求显式列出导入的类型名，故导入生成的标记组件 FontsLoaded；
+// 字体的真正注册发生在该文件内部的资源 import（副作用）。
+// fonts.slint 由 build.rs 生成到 OUT_DIR（并在 include_paths 中注册），
+// 因此这里只需写文件名（不能写 ui/ 前缀——OUT_DIR 不是 ui/ 的子目录）。
+import { FontsLoaded } from "fonts.slint";
 
 // 重新导出主题全局，使 Rust 侧（include_modules!）能生成并访问 Theme 类型
 export { Theme } from "ui/theme.slint";
@@ -149,6 +160,8 @@ export component App inherits Window {
     in-out property <string> app-version: "0.0.0";
     // SWE Serial 编号（由 Rust 侧 SWE_SERIAL 常量注入，对应 crossduty/1955.md 档案）
     in-out property <string> swe-serial: "<< 19 * 55 >>";
+    // SWE Serial 编号来历（由 Rust 侧 SWE_SERIAL_NOTE 注入）
+    in-out property <string> swe-serial-note: "";
     in-out property <[string]> history_items;
     in-out property <int> history_count: 0;
     in-out property <[string]> attachments;
@@ -384,6 +397,7 @@ export component App inherits Window {
                             sorg-banner: root.sorg_banner;
                             app-version: root.app-version;
                             swe-serial: root.swe-serial;
+                            swe-serial-note: root.swe-serial-note;
                         }
 
                         if tab == 5 : AutomationTab {

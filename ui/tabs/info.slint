@@ -11,6 +11,8 @@ export component InfoTab inherits Rectangle {
     in-out property <string> app-version: "0.0.0";
     // SWE Serial 编号（Rust 侧 SWE_SERIAL 注入，对应 crossduty/1955.md 档案）
     in-out property <string> swe-serial: "<< 19 * 55 >>";
+    // SWE Serial 编号来历（Rust 侧注入，纪念 1955 年新疆维吾尔自治区建立）
+    in-out property <string> swe-serial-note: "";
 
     VerticalLayout {
         spacing: 16px;
@@ -32,6 +34,12 @@ export component InfoTab inherits Rectangle {
                     font-size: 11px;
                     color: Theme.accent;
                     font-family: Theme.font_mono;
+                }
+                Text {
+                    text: root.swe-serial-note;
+                    font-size: 10px;
+                    color: Theme.muted;
+                    wrap: word_wrap;
                 }
             }
         }

@@ -1,0 +1,6 @@
+# 内置脚本与快照必须按 LF 存储/检出，保证跨平台字节一致
+# （编译期 SM3 校验依赖文件字节，CRLF 会导致哈希不符）
+scripts/*.rhai text eol=lf
+scripts/*.rhai.sm3 text eol=lf
+*.rs text eol=lf
+*.py text eol=lf

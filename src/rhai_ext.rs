@@ -22,6 +22,60 @@ use crate::log::LogStore;
 
 pub const SORG_BANNER: &str = "<<*>> SOrg :: -^v- SNOWARE\nCopyright (C) 2026~now S.A. Licensed under Mulan PubL v2.";
 
+/// 全局共享的 tokio 运行时。
+///
+/// 若每次 HTTP 原语调用都 `Runtime::new()`，会反复创建/销毁线程池，
+/// 叠加在请求延迟上显著拖慢发送（实测单次请求总耗时被推高到数秒）。
+static SHARED_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn shared_runtime() -> &'static tokio::runtime::Runtime {
+    SHARED_RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("创建 tokio 运行时失败")
+    })
+}
+
+/// 当前上传进度（字节）：(已发送, 总字节数)。
+///
+/// 大附件上传时，脚本内的 HTTP 调用是同步阻塞的，无法直接回调进度；
+/// 因此这里用一对原子计数器记录流式上传的已发送量与总量，
+/// 由 UI 侧的心跳线程定时读取，展示「3.2 MB / 10.0 MB」这样的实时进度。
+/// 上传未进行时 total 为 0（表示无进度可报）。
+static UPLOAD_SENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static UPLOAD_TOTAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 读取当前上传进度 (sent, total)；total 为 0 表示当前没有在上传。
+pub fn upload_progress() -> (usize, usize) {
+    use std::sync::atomic::Ordering;
+    (
+        UPLOAD_SENT.load(Ordering::Relaxed),
+        UPLOAD_TOTAL.load(Ordering::Relaxed),
+    )
+}
+
+/// 全局共享的 reqwest 客户端（复用连接池）。
+///
+/// 关键：若每次请求都 `Client::new()`，连接池无法复用，
+/// 每发一封邮件都要重做完整的 TCP + TLS 握手
+/// （实测 TLS 握手单项即达 1.5~4.3 秒），这正是「发一封要等十几秒」的主因。
+/// 共享客户端后，同进程内的后续请求可复用已建立的连接。
+static SHARED_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn shared_client() -> &'static reqwest::Client {
+    SHARED_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            // 此处不设总超时：总超时按请求体大小在每次调用处单独设置。
+            // pool 复用相关设置：允许空闲连接存活，避免频繁重建握手。
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .expect("创建 reqwest 客户端失败")
+    })
+}
+
 /// 自动化 handler 的一个输入组件（由脚本在 api::register_with_fields 中声明）
 #[derive(Clone, Debug)]
 pub struct AutomationField {
@@ -95,6 +149,10 @@ pub struct RhaiContext {
     pub trust_password: Arc<Mutex<String>>,
     /// 签名校验模式（来自 config，缓存供运行期读取）
     pub sig_verify: Arc<Mutex<String>>,
+    /// 当前脚本是否为官方内置且未被篡改（SM3 哈希匹配内置快照）。
+    /// 仅此标志为 true 时才自动信任放行敏感原语；被篡改/替换的脚本
+    /// 此标志为 false，必须显式 unlock（且若启用签名校验还需验签）。
+    pub builtin_verified: Arc<Mutex<bool>>,
     /// 引擎引用（供 api 模块调用已注册的 FnPtr）
     pub engine: OnceLock<Arc<Engine>>,
     /// 脚本 AST 引用（供 api 模块调用已注册的 FnPtr）
@@ -128,6 +186,7 @@ impl RhaiContext {
             trusted: Arc::new(Mutex::new(false)),
             trust_password: Arc::new(Mutex::new(String::new())),
             sig_verify: Arc::new(Mutex::new("off".to_string())),
+            builtin_verified: Arc::new(Mutex::new(false)),
             engine: OnceLock::new(),
             ast: OnceLock::new(),
             automations: Arc::new(Mutex::new(HashMap::new())),
@@ -144,33 +203,69 @@ impl RhaiContext {
 
 #[export_module]
 pub mod http_primitives {
-    /// 信任门控：未通过信任校验时，所有敏感原语返回禁用错误
+    /// 信任门控：未通过信任校验时，所有敏感原语返回禁用错误。
+    /// 信任门控：未通过信任校验时，所有敏感原语返回禁用错误。
+    /// 自动信任策略：仅当脚本为官方内置且未被篡改（builtin_verified==true）
+    /// 时才自动放行；否则必须显式 unlock（且若启用签名校验还需验签）。
+    /// 这保证「自动信任仅限自带未修改脚本」，篡改/替换的脚本无法自动获得信任。
     fn guard() -> Option<rhai::Array> {
         let ctx = crate::RHAI_CTX.get().expect("rhai ctx");
-        if !*ctx.trusted.lock().unwrap() {
-            return Some(make_err("脚本未受信任：功能已禁用，请在「设置 → 脚本信任」中启用并解锁"));
+        let trusted = *ctx.trusted.lock().unwrap();
+        let builtin = *ctx.builtin_verified.lock().unwrap();
+        if trusted || builtin {
+            None
+        } else {
+            Some(make_err("脚本未受信任：功能已禁用，请在「设置 → 脚本信任」中启用并解锁"))
         }
-        None
     }
 
     /// 发送 HTTP POST（JSON），返回 (status_code, body_string)
     pub fn post_json(url: &str, bearer: &str, body: rhai::Map) -> rhai::Array {
         if let Some(e) = guard() { return e; }
-        let rt = match tokio::runtime::Runtime::new() {
-            Ok(r) => r,
-            Err(e) => return make_err(&format!("runtime: {e}")),
-        };
-        rt.block_on(async move {
-            let client = reqwest::Client::new();
-            let mut req = client.post(url).header("Content-Type", "application/json");
+        shared_runtime().block_on(async move {
+            // body 是 rhai::Map，转 serde_json（先算出来以便按大小设定超时）
+            let mut b = body.clone();
+            let json_val: JValue = map_to_json(&mut b);
+            // 超时：避免大附件上传时网络异常导致请求无限挂起，
+            // 表现为界面「一直卡在发送中」且永不返回。
+            // 连接超时固定 15s（客户端级）；总超时按请求体大小缩放
+            // （基础 30s，每 MB 追加 10s，上限 300s），在请求级覆盖。
+            let bytes = json_val.to_string().len() as u64;
+            let mb = bytes / (1024 * 1024);
+            let total_secs = std::cmp::min(30 + mb * 10, 300);
+            // 复用共享客户端（连接池），仅在请求级覆盖总超时
+            let client = shared_client();
+            let mut req = client
+                .post(url)
+                .header("Content-Type", "application/json")
+                .timeout(std::time::Duration::from_secs(total_secs));
             if !bearer.is_empty() {
                 req = req.bearer_auth(bearer);
             }
-            // body 是 rhai::Map，转 serde_json
-            let mut b = body.clone();
-            let json_val: JValue = map_to_json(&mut b);
-            let resp = req.json(&json_val).send().await;
-            match resp {
+
+            // 流式上传：把 JSON 体切成块发送，逐块累加「已发送字节」，
+            // 供 UI 展示 MB/MB 实时进度。否则大附件上传期间用户只能干等。
+            use std::sync::atomic::Ordering;
+            let body_bytes = serde_json::to_vec(&json_val).unwrap_or_default();
+            let total_len = body_bytes.len();
+            UPLOAD_TOTAL.store(total_len, Ordering::Relaxed);
+            UPLOAD_SENT.store(0, Ordering::Relaxed);
+
+            use futures_util::StreamExt;
+            const CHUNK: usize = 64 * 1024;
+            let chunks: Vec<Result<Vec<u8>, std::io::Error>> = body_bytes
+                .chunks(CHUNK)
+                .map(|c| Ok(c.to_vec()))
+                .collect();
+            let stream = futures_util::stream::iter(chunks).map(move |c| {
+                if let Ok(ref v) = c {
+                    UPLOAD_SENT.fetch_add(v.len(), Ordering::Relaxed);
+                }
+                c
+            });
+            let resp = req.body(reqwest::Body::wrap_stream(stream)).send().await;
+            // 上传结束：清零进度，避免下次发送前读到陈旧值
+            let outcome = match resp {
                 Ok(r) => {
                     let status = r.status().as_u16() as i64;
                     let txt = r.text().await.unwrap_or_default();
@@ -179,21 +274,33 @@ pub mod http_primitives {
                         rhai::Dynamic::from(txt),
                     ])
                 }
-                Err(e) => make_err(&format!("request: {e}")),
-            }
+                Err(e) => make_err(&describe_reqwest_error(&e, total_secs)),
+            };
+            UPLOAD_TOTAL.store(0, Ordering::Relaxed);
+            UPLOAD_SENT.store(0, Ordering::Relaxed);
+            outcome
         })
+    }
+
+    /// 查询当前上传进度：(已发送字节, 总字节数)。
+    /// 返回数组 [sent, total]；total 为 0 表示当前没有上传在进行。
+    pub fn upload_progress() -> rhai::Array {
+        let (sent, total) = crate::rhai_ext::upload_progress();
+        rhai::Array::from([
+            rhai::Dynamic::from(sent as i64),
+            rhai::Dynamic::from(total as i64),
+        ])
     }
 
     /// GET 请求，返回 (status_code, body_string)
     pub fn get(url: &str, bearer: &str) -> rhai::Array {
         if let Some(e) = guard() { return e; }
-        let rt = match tokio::runtime::Runtime::new() {
-            Ok(r) => r,
-            Err(e) => return make_err(&format!("runtime: {e}")),
-        };
-        rt.block_on(async move {
-            let client = reqwest::Client::new();
-            let mut req = client.get(url);
+        shared_runtime().block_on(async move {
+            // 复用共享客户端（连接池）；连接 15s（客户端级）/ 总 30s（请求级）
+            let client = shared_client();
+            let mut req = client
+                .get(url)
+                .timeout(std::time::Duration::from_secs(30));
             if !bearer.is_empty() {
                 req = req.bearer_auth(bearer);
             }
@@ -206,7 +313,7 @@ pub mod http_primitives {
                         rhai::Dynamic::from(txt),
                     ])
                 }
-                Err(e) => make_err(&format!("request: {e}")),
+                Err(e) => make_err(&describe_reqwest_error(&e, 30)),
             }
         })
     }
@@ -238,9 +345,39 @@ pub mod http_primitives {
         } else if d.is_array() {
             let mut arr = d.clone().into_array().unwrap_or_default();
             JValue::Array(arr.iter_mut().map(dyn_to_json).collect())
+        } else if d.is_map() {
+            // 关键修复：附件在脚本内被组织为 Map（{filename, content}），
+            // 若 Map 转 JSON 时直接丢弃为 Null，Resend 会收到 attachments=[null,...]，
+            // 从而报 422 "expected object, received null"。
+            let mut map = d.clone().cast::<rhai::Map>();
+            let mut obj = serde_json::Map::new();
+            for (k, v) in map.iter_mut() {
+                obj.insert(k.to_string(), dyn_to_json(v));
+            }
+            JValue::Object(obj)
         } else {
             JValue::Null
         }
+    }
+}
+
+/// 把 reqwest 错误翻译成用户可读的中文提示（超时 / 连接失败 / 其他）。
+/// 放在 `#[export_module]` 之外：Rhai 导出宏会尝试注册模块内的 fn，
+/// 而本函数签名（&reqwest::Error）无法被 Rhai 注册，故必须置于模块外。
+/// 超时必须显性化：否则大附件上传中途网络异常时，用户只能看到模糊的
+/// 「发送失败」，无法判断是超时还是被拒绝。
+fn describe_reqwest_error(e: &reqwest::Error, timeout_secs: u64) -> String {
+    if e.is_timeout() {
+        format!(
+            "请求超时（已等待 {} 秒）。可能是网络较慢或附件过大，请检查网络后重试",
+            timeout_secs
+        )
+    } else if e.is_connect() {
+        format!("网络连接失败（无法连接到服务器）：{e}")
+    } else if e.is_request() {
+        format!("请求构造失败：{e}")
+    } else {
+        format!("请求失败：{e}")
     }
 }
 
@@ -254,10 +391,13 @@ pub mod crypto_primitives {
 
     fn guard() -> Option<rhai::ImmutableString> {
         let ctx = crate::RHAI_CTX.get().expect("rhai ctx");
-        if !*ctx.trusted.lock().unwrap() {
-            return Some("ERR: 脚本未受信任：加密原语已禁用".into());
+        let trusted = *ctx.trusted.lock().unwrap();
+        let builtin = *ctx.builtin_verified.lock().unwrap();
+        if trusted || builtin {
+            None
+        } else {
+            Some("ERR: 脚本未受信任：加密原语已禁用".into())
         }
-        None
     }
 
     /// 用给定密码加密明文，返回 "ct|nonce|salt" 三个 base64 拼接
@@ -308,10 +448,13 @@ pub mod store_primitives {
 
     fn guard() -> Option<rhai::ImmutableString> {
         let ctx = crate::RHAI_CTX.get().expect("rhai ctx");
-        if !*ctx.trusted.lock().unwrap() {
-            return Some("ERR: 脚本未受信任：存储原语已禁用".into());
+        let trusted = *ctx.trusted.lock().unwrap();
+        let builtin = *ctx.builtin_verified.lock().unwrap();
+        if trusted || builtin {
+            None
+        } else {
+            Some("ERR: 脚本未受信任：存储原语已禁用".into())
         }
-        None
     }
 
     /// 读取配置字段（返回字符串；加密字段返回密文）
